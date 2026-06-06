@@ -72,10 +72,11 @@ program
 program
     .command('setup')
     .description('Configure AI agent clients to route tools through undomcp')
-    .action(() => {
-    console.log('[undomcp] Setup auto-discovery and proxy configuration will be fully implemented in Phase 6.');
-    console.log('To run manually, configure your client to execute the undomcp binary:');
-    console.log('  undomcp serve --command <original-mcp-server> --args "<args>"');
+    .option('--restore', 'Restore original configuration prior to undomcp setup')
+    .option('--binary-path <path>', 'Absolute path to the undomcp binary')
+    .action(async (options) => {
+    const { runSetup } = await import('./commands/setup.js');
+    await runSetup(options);
 });
 // Handle default command (no arguments)
 if (process.argv.length <= 2) {

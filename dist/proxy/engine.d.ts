@@ -4,6 +4,7 @@ import { SchemaCache } from '../undo/schema-cache.js';
 export interface ProxyEngineOptions {
     command: string;
     args: string[];
+    configPath?: string;
     env?: Record<string, string>;
     dbManager?: DatabaseManager;
     sessionId?: string;
@@ -16,7 +17,6 @@ export declare class ProxyEngine {
     private command;
     private args;
     private env;
-    private childProcess;
     private isStopping;
     private onRequestCallback?;
     private onResponseCallback?;
@@ -29,9 +29,9 @@ export declare class ProxyEngine {
     private schemaCache;
     private undoController;
     private pendingCompensations;
+    private upstreamManager;
     private activeRequests;
     private agentReader;
-    private upstreamReader;
     constructor(options: ProxyEngineOptions);
     /**
      * Updates the active turn ID dynamically.
@@ -42,20 +42,18 @@ export declare class ProxyEngine {
      */
     getSchemaCache(): SchemaCache;
     /**
-     * Starts the proxy engine by spawning the upstream process and connecting streams.
+     * Starts the proxy engine by spawning the upstream processes and connecting streams.
      */
     start(agentStdin?: Readable, agentStdout?: Writable, agentStderr?: Writable): void;
     /**
-     * Stops the proxy engine and terminates the child process.
+     * Stops the proxy engine and terminates the child processes.
      */
     stop(): void;
     private cleanup;
     private setupSignalHandlers;
     private handleMarkTurn;
     private handleAgentLine;
-    private handleUpstreamLine;
     private executeCompensatingCall;
     private handleUndoToolCall;
-    private forwardToUpstream;
     private forwardToAgent;
 }

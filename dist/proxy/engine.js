@@ -1,4 +1,3 @@
-import { spawn } from 'child_process';
 import * as readline from 'readline';
 import { SchemaCache } from '../undo/schema-cache.js';
 import { nanoid } from 'nanoid';
@@ -6,12 +5,12 @@ import { SnapshotStore } from '../file-safety/snapshot-store.js';
 import { InverseResolver } from '../undo/inverse-resolver.js';
 import { UndoController } from '../undo/undo-controller.js';
 import { LlmSolver } from '../undo/llm-solver.js';
+import { UpstreamManager } from './upstream-manager.js';
 import { UNDO_TOOLS, handleInteractive, handleListTurns, handlePreviewUndo, handleUndoSelection } from '../tools/undo-tools.js';
 export class ProxyEngine {
     command;
     args;
     env;
-    childProcess = null;
     isStopping = false;
     onRequestCallback;
     onResponseCallback;
@@ -24,10 +23,10 @@ export class ProxyEngine {
     schemaCache = new SchemaCache();
     undoController = null;
     pendingCompensations = new Map();
+    upstreamManager;
     // Track active requests by their JSON-RPC ID to map responses back
     activeRequests = new Map();
     agentReader;
-    upstreamReader;
     constructor(options) {
         this.command = options.command;
         this.args = options.args;
@@ -52,6 +51,10 @@ export class ProxyEngine {
                 console.error(`[undomcp] Error initializing sequence number: ${err.message}`);
             }
         }
+        this.upstreamManager = new UpstreamManager(options.configPath, {
+            command: this.command,
+            args: this.args
+        });
         if (this.dbManager) {
             const snapshotStore = new SnapshotStore(this.dbManager);
             const inverseResolver = new InverseResolver(this.schemaCache);
@@ -81,46 +84,19 @@ export class ProxyEngine {
         return this.schemaCache;
     }
     /**
-     * Starts the proxy engine by spawning the upstream process and connecting streams.
+     * Starts the proxy engine by spawning the upstream processes and connecting streams.
      */
     start(agentStdin = process.stdin, agentStdout = process.stdout, agentStderr = process.stderr) {
         this.isStopping = false;
-        // Spawn upstream process
-        this.childProcess = spawn(this.command, this.args, {
-            env: this.env,
-            stdio: ['pipe', 'pipe', 'pipe'],
-        });
-        // Handle upstream errors
-        this.childProcess.on('error', (err) => {
-            if (!this.isStopping) {
-                agentStderr.write(`[undomcp] Upstream process failed to start: ${err.message}\n`);
-                process.exit(1);
-            }
-        });
-        // Pipe upstream stderr directly to agent stderr for debug logs
-        this.childProcess.stderr?.on('data', (data) => {
-            agentStderr.write(data);
-        });
-        // Handle upstream process exit
-        this.childProcess.on('exit', (code, signal) => {
-            this.cleanup();
-            if (this.isStopping)
-                return;
-            if (code !== null) {
-                process.exit(code);
-            }
-            else if (signal) {
-                process.exit(1);
-            }
-        });
-        // Create line-by-line readers
+        // Start all configured upstreams
+        this.upstreamManager.start(agentStderr);
+        // Forward upstream messages (not parsed by pending promises) to the agent
+        this.upstreamManager.onMessage = (ns, msg) => {
+            this.forwardToAgent(JSON.stringify(msg), agentStdout);
+        };
+        // Create line-by-line reader for agent input
         this.agentReader = readline.createInterface({
             input: agentStdin,
-            output: undefined,
-            historySize: 0,
-        });
-        this.upstreamReader = readline.createInterface({
-            input: this.childProcess.stdout,
             output: undefined,
             historySize: 0,
         });
@@ -128,41 +104,31 @@ export class ProxyEngine {
         this.agentReader.on('line', (line) => {
             this.handleAgentLine(line, agentStdout);
         });
-        // Process upstream responses -> agent
-        this.upstreamReader.on('line', (line) => {
-            this.handleUpstreamLine(line, agentStdout);
-        });
         // Setup signal forwarding
         this.setupSignalHandlers();
     }
     /**
-     * Stops the proxy engine and terminates the child process.
+     * Stops the proxy engine and terminates the child processes.
      */
     stop() {
         this.isStopping = true;
         this.cleanup();
-        if (this.childProcess) {
-            this.childProcess.kill('SIGTERM');
-            this.childProcess = null;
-        }
+        this.upstreamManager.stop();
     }
     cleanup() {
         try {
             this.agentReader.close();
-            this.upstreamReader.close();
         }
         catch {
             // Ignore cleanup failures
         }
     }
     setupSignalHandlers() {
-        const forwardSignal = (signal) => {
-            if (this.childProcess) {
-                this.childProcess.kill(signal);
-            }
+        const forwardSignal = () => {
+            this.upstreamManager.stop();
         };
-        process.on('SIGINT', () => forwardSignal('SIGINT'));
-        process.on('SIGTERM', () => forwardSignal('SIGTERM'));
+        process.on('SIGINT', () => forwardSignal());
+        process.on('SIGTERM', () => forwardSignal());
     }
     async handleMarkTurn(request, agentStdout) {
         if (this.dbManager && this.sessionId) {
@@ -208,33 +174,115 @@ export class ProxyEngine {
             parsed = JSON.parse(line);
         }
         catch {
-            // If not valid JSON, forward it as-is to let upstream handle/fail
-            this.forwardToUpstream(line);
+            // If not valid JSON, forward it to default upstream
+            const defNs = this.upstreamManager.getNamespaces()[0] || 'default';
+            this.upstreamManager.getUpstreamInstance(defNs)?.process.stdin?.write(line + '\n');
             return;
         }
-        // Check if it's a request (has id and method)
         const isRequest = parsed && parsed.id !== undefined && parsed.method !== undefined;
         if (isRequest) {
+            if (parsed.method === 'tools/list') {
+                if (this.onRequestCallback) {
+                    try {
+                        await this.onRequestCallback(parsed);
+                    }
+                    catch (err) {
+                        console.error(`[undomcp] Error in onRequest callback: ${err.message}`);
+                    }
+                }
+                try {
+                    const allTools = await this.upstreamManager.listAllTools();
+                    this.schemaCache.updateFromToolsList({ tools: allTools });
+                    const aggregatedTools = [...allTools, ...UNDO_TOOLS];
+                    const response = {
+                        jsonrpc: '2.0',
+                        id: parsed.id,
+                        result: {
+                            tools: aggregatedTools
+                        }
+                    };
+                    if (this.onResponseCallback) {
+                        try {
+                            await this.onResponseCallback(parsed, response);
+                        }
+                        catch (err) {
+                            console.error(`[undomcp] Error in onResponse callback: ${err.message}`);
+                        }
+                    }
+                    this.forwardToAgent(JSON.stringify(response), agentStdout);
+                }
+                catch (err) {
+                    const response = {
+                        jsonrpc: '2.0',
+                        id: parsed.id,
+                        error: {
+                            code: -32603,
+                            message: `Failed listing upstream tools: ${err.message}`
+                        }
+                    };
+                    if (this.onResponseCallback) {
+                        try {
+                            await this.onResponseCallback(parsed, response);
+                        }
+                        catch (err) {
+                            console.error(`[undomcp] Error in onResponse callback: ${err.message}`);
+                        }
+                    }
+                    this.forwardToAgent(JSON.stringify(response), agentStdout);
+                }
+                return;
+            }
             if (parsed.method === 'tools/call') {
                 const toolName = parsed.params?.name || '';
                 if (toolName.startsWith('undomcp_')) {
                     await this.handleUndoToolCall(parsed, agentStdout);
                     return;
                 }
-            }
-            let actionId;
-            const startTime = Date.now();
-            // Database journaling hook for tool calls
-            if (this.dbManager && this.sessionId && parsed.method === 'tools/call') {
-                try {
-                    const toolName = parsed.params?.name || '';
-                    const parts = toolName.split('__');
-                    const namespace = parts.length > 1 ? parts[0] : undefined;
-                    const baseToolName = parts.length > 1 ? parts[1] : toolName;
-                    // Resolve turn clustering
-                    if (!this.turnId) {
-                        const lastTurn = this.dbManager.getLastTurnForSession(this.sessionId);
-                        if (lastTurn) {
+                // Journaling tool call
+                let actionId;
+                const startTime = Date.now();
+                if (this.dbManager && this.sessionId) {
+                    try {
+                        const parts = toolName.split('__');
+                        const namespace = parts.length > 1 ? parts[0] : undefined;
+                        const baseToolName = parts.length > 1 ? parts[1] : toolName;
+                        // Turn clustering
+                        if (!this.turnId) {
+                            const lastTurn = this.dbManager.getLastTurnForSession(this.sessionId);
+                            if (lastTurn) {
+                                if (this.lastActionEndTime === undefined) {
+                                    const lastActionTimeStr = this.dbManager.getLastActionTimestampForSession(this.sessionId);
+                                    if (lastActionTimeStr) {
+                                        this.lastActionEndTime = Date.parse(lastActionTimeStr);
+                                    }
+                                }
+                                if (this.lastActionEndTime !== undefined && (Date.now() - this.lastActionEndTime > this.turnIdleTimeoutMs)) {
+                                    const nextTurnNum = lastTurn.turnNum + 1;
+                                    this.turnId = `turn_${nanoid()}`;
+                                    this.dbManager.createTurn({
+                                        id: this.turnId,
+                                        sessionId: this.sessionId,
+                                        turnNum: nextTurnNum,
+                                        timestamp: new Date().toISOString(),
+                                        actionCount: 0
+                                    });
+                                }
+                                else {
+                                    this.turnId = lastTurn.id;
+                                }
+                            }
+                            else {
+                                this.turnId = `turn_${nanoid()}`;
+                                this.dbManager.createTurn({
+                                    id: this.turnId,
+                                    sessionId: this.sessionId,
+                                    turnNum: 1,
+                                    timestamp: new Date().toISOString(),
+                                    actionCount: 0
+                                });
+                            }
+                        }
+                        else {
                             if (this.lastActionEndTime === undefined) {
                                 const lastActionTimeStr = this.dbManager.getLastActionTimestampForSession(this.sessionId);
                                 if (lastActionTimeStr) {
@@ -242,7 +290,8 @@ export class ProxyEngine {
                                 }
                             }
                             if (this.lastActionEndTime !== undefined && (Date.now() - this.lastActionEndTime > this.turnIdleTimeoutMs)) {
-                                const nextTurnNum = lastTurn.turnNum + 1;
+                                const lastTurn = this.dbManager.getLastTurnForSession(this.sessionId);
+                                const nextTurnNum = lastTurn ? lastTurn.turnNum + 1 : 1;
                                 this.turnId = `turn_${nanoid()}`;
                                 this.dbManager.createTurn({
                                     id: this.turnId,
@@ -252,81 +301,96 @@ export class ProxyEngine {
                                     actionCount: 0
                                 });
                             }
-                            else {
-                                this.turnId = lastTurn.id;
-                            }
                         }
-                        else {
-                            this.turnId = `turn_${nanoid()}`;
-                            this.dbManager.createTurn({
-                                id: this.turnId,
-                                sessionId: this.sessionId,
-                                turnNum: 1,
-                                timestamp: new Date().toISOString(),
-                                actionCount: 0
-                            });
+                        actionId = `act_${nanoid()}`;
+                        const args = parsed.params?.arguments || {};
+                        let label = `Call ${toolName}`;
+                        if (baseToolName === 'write_file' || baseToolName === 'edit_file' || baseToolName === 'replace_file_content' || baseToolName === 'write_to_file') {
+                            const filePath = args.path || args.TargetFile || args.filePath || '';
+                            label = `Modify file: ${filePath}`;
+                        }
+                        else if (baseToolName === 'run_command' || baseToolName === 'execute_command') {
+                            const command = args.command || args.CommandLine || '';
+                            label = `Execute command: ${command}`;
+                        }
+                        else if (args.path || args.file || args.filename) {
+                            const pathVal = args.path || args.file || args.filename;
+                            label = `${baseToolName} on ${pathVal}`;
+                        }
+                        else if (args.id || args.name) {
+                            const idVal = args.id || args.name;
+                            label = `${baseToolName} (${idVal})`;
+                        }
+                        const action = {
+                            id: actionId,
+                            sessionId: this.sessionId,
+                            turnId: this.turnId,
+                            sequenceNum: this.nextSequenceNum++,
+                            timestamp: new Date(startTime).toISOString(),
+                            actionType: 'mcp_call',
+                            toolName: baseToolName,
+                            namespace,
+                            parameters: args,
+                            state: 'executed',
+                            metadata: { label }
+                        };
+                        this.dbManager.createAction(action);
+                    }
+                    catch (err) {
+                        console.error(`[undomcp] Database error in pre-action logging: ${err.message}`);
+                    }
+                }
+                if (this.onRequestCallback) {
+                    try {
+                        await this.onRequestCallback(parsed);
+                    }
+                    catch (err) {
+                        console.error(`[undomcp] Error in onRequest callback: ${err.message}`);
+                    }
+                }
+                // Forward call upstream and wait for response
+                try {
+                    const response = await this.upstreamManager.routeCall(toolName, parsed.params.arguments, parsed.id);
+                    this.lastActionEndTime = Date.now();
+                    // Journal response
+                    if (this.dbManager && actionId) {
+                        try {
+                            const latencyMs = Date.now() - startTime;
+                            const hasRpcError = response.error !== undefined;
+                            const hasMcpError = response.result && response.result.isError === true;
+                            const success = !hasRpcError && !hasMcpError;
+                            const resultData = response.result || response.error || {};
+                            this.dbManager.updateActionResults(actionId, success, resultData, latencyMs);
+                        }
+                        catch (err) {
+                            console.error(`[undomcp] Database error in post-action logging: ${err.message}`);
                         }
                     }
-                    else {
-                        if (this.lastActionEndTime === undefined) {
-                            const lastActionTimeStr = this.dbManager.getLastActionTimestampForSession(this.sessionId);
-                            if (lastActionTimeStr) {
-                                this.lastActionEndTime = Date.parse(lastActionTimeStr);
-                            }
+                    if (this.onResponseCallback) {
+                        try {
+                            await this.onResponseCallback(parsed, response);
                         }
-                        if (this.lastActionEndTime !== undefined && (Date.now() - this.lastActionEndTime > this.turnIdleTimeoutMs)) {
-                            const lastTurn = this.dbManager.getLastTurnForSession(this.sessionId);
-                            const nextTurnNum = lastTurn ? lastTurn.turnNum + 1 : 1;
-                            this.turnId = `turn_${nanoid()}`;
-                            this.dbManager.createTurn({
-                                id: this.turnId,
-                                sessionId: this.sessionId,
-                                turnNum: nextTurnNum,
-                                timestamp: new Date().toISOString(),
-                                actionCount: 0
-                            });
+                        catch (err) {
+                            console.error(`[undomcp] Error in onResponse callback: ${err.message}`);
                         }
                     }
-                    actionId = `act_${nanoid()}`;
-                    // Generate human-readable label
-                    const args = parsed.params?.arguments || {};
-                    let label = `Call ${toolName}`;
-                    if (baseToolName === 'write_file' || baseToolName === 'edit_file' || baseToolName === 'replace_file_content' || baseToolName === 'write_to_file') {
-                        const filePath = args.path || args.TargetFile || args.filePath || '';
-                        label = `Modify file: ${filePath}`;
-                    }
-                    else if (baseToolName === 'run_command' || baseToolName === 'execute_command') {
-                        const command = args.command || args.CommandLine || '';
-                        label = `Execute command: ${command}`;
-                    }
-                    else if (args.path || args.file || args.filename) {
-                        const pathVal = args.path || args.file || args.filename;
-                        label = `${baseToolName} on ${pathVal}`;
-                    }
-                    else if (args.id || args.name) {
-                        const idVal = args.id || args.name;
-                        label = `${baseToolName} (${idVal})`;
-                    }
-                    const action = {
-                        id: actionId,
-                        sessionId: this.sessionId,
-                        turnId: this.turnId,
-                        sequenceNum: this.nextSequenceNum++,
-                        timestamp: new Date(startTime).toISOString(),
-                        actionType: 'mcp_call',
-                        toolName: baseToolName,
-                        namespace,
-                        parameters: args,
-                        state: 'executed',
-                        metadata: { label }
-                    };
-                    this.dbManager.createAction(action);
+                    // Send response back to agent
+                    this.forwardToAgent(JSON.stringify(response), agentStdout);
                 }
                 catch (err) {
-                    console.error(`[undomcp] Database error in pre-action logging: ${err.message}`);
+                    const response = {
+                        jsonrpc: '2.0',
+                        id: parsed.id,
+                        error: {
+                            code: -32603,
+                            message: `Call execution failed upstream: ${err.message}`
+                        }
+                    };
+                    this.forwardToAgent(JSON.stringify(response), agentStdout);
                 }
+                return;
             }
-            this.activeRequests.set(parsed.id, { request: parsed, actionId, startTime });
+            // Lifecycle call (e.g. initialize)
             if (this.onRequestCallback) {
                 try {
                     await this.onRequestCallback(parsed);
@@ -335,92 +399,58 @@ export class ProxyEngine {
                     console.error(`[undomcp] Error in onRequest callback: ${err.message}`);
                 }
             }
-        }
-        this.forwardToUpstream(line);
-    }
-    async handleUpstreamLine(line, agentStdout) {
-        if (!line.trim())
-            return;
-        let parsed;
-        try {
-            parsed = JSON.parse(line);
-        }
-        catch {
-            // Forward as-is
-            this.forwardToAgent(line, agentStdout);
-            return;
-        }
-        // Check if it's a response matching an active request or a compensation
-        const isResponse = parsed && parsed.id !== undefined && (parsed.result !== undefined || parsed.error !== undefined);
-        if (isResponse) {
-            const activeComp = this.pendingCompensations.get(parsed.id);
-            if (activeComp) {
-                this.pendingCompensations.delete(parsed.id);
-                activeComp(parsed);
-                return; // swallow response to proxy-initiated compensating call
-            }
-            const activeReq = this.activeRequests.get(parsed.id);
-            if (activeReq) {
-                this.activeRequests.delete(parsed.id);
-                this.lastActionEndTime = Date.now();
-                const { request: originalRequest, actionId, startTime } = activeReq;
-                // Populate schema cache from tools/list responses
-                if (originalRequest.method === 'tools/list' && parsed.result) {
-                    try {
-                        this.schemaCache.updateFromToolsList(parsed.result);
-                    }
-                    catch (err) {
-                        console.error(`[undomcp] Error caching tool schemas: ${err.message}`);
-                    }
-                    if (Array.isArray(parsed.result.tools)) {
-                        parsed.result.tools = [...parsed.result.tools, ...UNDO_TOOLS];
-                        line = JSON.stringify(parsed);
-                    }
-                }
-                // Database journaling hook for responses
-                if (this.dbManager && actionId) {
-                    try {
-                        const endTime = Date.now();
-                        const latencyMs = endTime - startTime;
-                        // Check success/failure
-                        const hasRpcError = parsed.error !== undefined;
-                        const hasMcpError = parsed.result && parsed.result.isError === true;
-                        const success = !hasRpcError && !hasMcpError;
-                        // Extract result data: result or error details
-                        const resultData = parsed.result || parsed.error || {};
-                        this.dbManager.updateActionResults(actionId, success, resultData, latencyMs);
-                    }
-                    catch (err) {
-                        console.error(`[undomcp] Database error in post-action logging: ${err.message}`);
-                    }
-                }
+            try {
+                const response = await this.upstreamManager.broadcast(parsed.method, parsed.params, parsed.id);
                 if (this.onResponseCallback) {
                     try {
-                        await this.onResponseCallback(originalRequest, parsed);
+                        await this.onResponseCallback(parsed, response);
                     }
                     catch (err) {
                         console.error(`[undomcp] Error in onResponse callback: ${err.message}`);
                     }
                 }
+                this.forwardToAgent(JSON.stringify(response), agentStdout);
+            }
+            catch (err) {
+                const response = {
+                    jsonrpc: '2.0',
+                    id: parsed.id,
+                    error: {
+                        code: -32603,
+                        message: `Broadcast request failed: ${err.message}`
+                    }
+                };
+                if (this.onResponseCallback) {
+                    try {
+                        await this.onResponseCallback(parsed, response);
+                    }
+                    catch (err) {
+                        console.error(`[undomcp] Error in onResponse callback: ${err.message}`);
+                    }
+                }
+                this.forwardToAgent(JSON.stringify(response), agentStdout);
             }
         }
-        this.forwardToAgent(line, agentStdout);
+        else {
+            // Notification
+            for (const ns of this.upstreamManager.getNamespaces()) {
+                this.upstreamManager.callUpstreamDirect(ns, parsed.method, parsed.params, undefined).catch(() => { });
+            }
+        }
     }
     async executeCompensatingCall(toolName, args) {
-        return new Promise((resolve) => {
-            const callId = `proxy_compensate_${nanoid()}`;
-            this.pendingCompensations.set(callId, (res) => resolve(res));
-            const request = {
-                jsonrpc: '2.0',
-                id: callId,
-                method: 'tools/call',
-                params: {
-                    name: toolName,
-                    arguments: args
-                }
-            };
-            this.forwardToUpstream(JSON.stringify(request));
-        });
+        const parts = toolName.split('__');
+        let ns = this.upstreamManager.getNamespaces()[0] || 'default';
+        let baseToolName = toolName;
+        if (parts.length > 1 && this.upstreamManager.getNamespaces().includes(parts[0])) {
+            ns = parts[0];
+            baseToolName = parts[1];
+        }
+        const callId = `proxy_compensate_${nanoid()}`;
+        return this.upstreamManager.callUpstreamDirect(ns, 'tools/call', {
+            name: baseToolName,
+            arguments: args
+        }, callId);
     }
     async handleUndoToolCall(request, agentStdout) {
         const toolName = request.params?.name;
@@ -520,11 +550,6 @@ export class ProxyEngine {
             ...(error ? { error } : { result })
         };
         this.forwardToAgent(JSON.stringify(response), agentStdout);
-    }
-    forwardToUpstream(line) {
-        if (this.childProcess && this.childProcess.stdin && !this.childProcess.stdin.destroyed) {
-            this.childProcess.stdin.write(line + '\n');
-        }
     }
     forwardToAgent(line, agentStdout) {
         if (!agentStdout.destroyed) {
