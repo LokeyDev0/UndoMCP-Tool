@@ -35,7 +35,7 @@ if (buildAll) {
     try {
       execSync(`bun build --compile --minify --sourcemap --target=${t.target} ./src/index.ts --outfile "${outfile}"`, { stdio: 'inherit' });
       console.log(`[undomcp] Successfully compiled target ${t.name}`);
-    } catch (err: any) {
+    } catch (err) {
       console.error(`[undomcp] Failed compiling for target ${t.target}: ${err.message}`);
     }
   }
@@ -46,7 +46,7 @@ if (buildAll) {
   try {
     execSync(`bun build --compile --minify --sourcemap ./src/index.ts --outfile "${outfile}"`, { stdio: 'inherit' });
     console.log(`[undomcp] Successfully compiled for host platform`);
-  } catch (err: any) {
+  } catch (err) {
     console.error(`[undomcp] Failed compilation: ${err.message}`);
     process.exit(1);
   }
