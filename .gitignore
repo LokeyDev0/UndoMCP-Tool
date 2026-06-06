@@ -1,0 +1,19 @@
+# Local development plan
+development_plan.md
+
+# Package managers
+node_modules/
+
+# Build outputs
+# (uncomment if you want to ignore dist/ but currently it has compiled files tracked)
+# dist/
+
+# Logs and databases
+*.log
+*.db
+journal.db
+journal.db-journal
+
+# Testing results
+.vite/
+node_modules/.vite/
