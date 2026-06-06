@@ -118,4 +118,79 @@ describe('ProxyEngine', () => {
       }
     }
   });
+
+  it('should initialize WorkspaceFileWatcher and log file change events to the database', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'undomcp-engine-watch-'));
+    const tempDbPath = path.join(tempDir, 'test.db');
+    const { DatabaseManager } = await import('../src/journal/database-manager.js');
+    const dbManager = new DatabaseManager(tempDbPath);
+
+    const sessionId = 'test_sess_engine_watch';
+    dbManager.createSession({
+      id: sessionId,
+      startedAt: new Date().toISOString(),
+      workingDirectory: tempDir
+    });
+
+    const mockUpstreamPath = path.join(tempDir, 'mock-upstream.js');
+    fs.writeFileSync(mockUpstreamPath, `
+      const readline = require('readline');
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+        terminal: false
+      });
+      rl.on('line', (line) => {
+        console.log(line);
+      });
+    `);
+
+    const engine = new ProxyEngine({
+      command: 'node',
+      args: [mockUpstreamPath],
+      dbManager,
+      sessionId
+    });
+
+    const agentStdin = new PassThrough();
+    const agentStdout = new PassThrough();
+    const agentStderr = new PassThrough();
+
+    engine.start(agentStdin, agentStdout, agentStderr);
+    if (engine.watcherPromise) {
+      await engine.watcherPromise;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Write a file to trigger file creation
+    const filePath = path.join(tempDir, 'created-file.txt');
+    fs.writeFileSync(filePath, 'Hello World');
+
+    // Wait for file watch event to propagate and be logged to SQLite
+    await new Promise<void>((resolve, reject) => {
+      const startTime = Date.now();
+      const interval = setInterval(() => {
+        const actions = dbManager.getActionsForSession(sessionId);
+        const fileChangeAction = actions.find(a => a.actionType === 'file_change');
+        if (fileChangeAction) {
+          clearInterval(interval);
+          expect(fileChangeAction.parameters?.operation).toBe('create');
+          expect(fileChangeAction.parameters?.filePath).toBe(filePath);
+          resolve();
+        } else if (Date.now() - startTime > 5000) {
+          clearInterval(interval);
+          reject(new Error('Timeout waiting for file_change event to log to db'));
+        }
+      }, 100);
+    });
+
+    engine.stop();
+    dbManager.close();
+
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // Ignore
+    }
+  }, 10000);
 });

@@ -435,4 +435,132 @@ describe('UndoController', () => {
       expect(fs.readFileSync(filePath, 'utf8')).toBe('External edit');
     });
   });
+
+  describe('executeFileDelete (undoing create)', () => {
+    it('should successfully delete a created file if there is no conflict', async () => {
+      const filePath = path.join(tempDir, 'created-file.txt');
+      fs.writeFileSync(filePath, 'Initial content');
+
+      const { computeSha256 } = await import('../src/file-safety/snapshot-store.js');
+      const postHash = computeSha256(Buffer.from('Initial content'));
+
+      const action = createTestAction({
+        actionType: 'file_change',
+        postHash,
+        parameters: { filePath, operation: 'create' },
+      });
+
+      const results = await controller.execute([action.id]);
+
+      expect(results.length).toBe(1);
+      expect(results[0].success).toBe(true);
+      expect(results[0].outcome).toBe('file_restored');
+
+      // File should be deleted
+      expect(fs.existsSync(filePath)).toBe(false);
+
+      // Action state should be updated to undone
+      const updatedAction = dbManager.getAction(action.id);
+      expect(updatedAction?.state).toBe('undone');
+    });
+
+    it('should succeed if file does not exist', async () => {
+      const filePath = path.join(tempDir, 'nonexistent-created-file.txt');
+
+      const action = createTestAction({
+        actionType: 'file_change',
+        postHash: 'some_hash',
+        parameters: { filePath, operation: 'create' },
+      });
+
+      const results = await controller.execute([action.id]);
+
+      expect(results.length).toBe(1);
+      expect(results[0].success).toBe(true);
+      expect(results[0].outcome).toBe('file_restored');
+
+      const updatedAction = dbManager.getAction(action.id);
+      expect(updatedAction?.state).toBe('undone');
+    });
+
+    it('should skip if file was modified externally and conflictResolver returns exit', async () => {
+      const filePath = path.join(tempDir, 'created-conflict.txt');
+      fs.writeFileSync(filePath, 'Initial content');
+
+      const { computeSha256 } = await import('../src/file-safety/snapshot-store.js');
+      const postHash = computeSha256(Buffer.from('Initial content'));
+
+      // Modify the file externally
+      fs.writeFileSync(filePath, 'Modified content');
+
+      const action = createTestAction({
+        actionType: 'file_change',
+        postHash,
+        parameters: { filePath, operation: 'create' },
+      });
+
+      const results = await controller.execute([action.id], async () => 'exit');
+
+      expect(results.length).toBe(1);
+      expect(results[0].success).toBe(true);
+      expect(results[0].outcome).toBe('skipped');
+
+      // File should still exist
+      expect(fs.existsSync(filePath)).toBe(true);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('Modified content');
+    });
+
+    it('should overwrite and delete if file was modified externally and conflictResolver returns overwrite', async () => {
+      const filePath = path.join(tempDir, 'created-conflict-overwrite.txt');
+      fs.writeFileSync(filePath, 'Initial content');
+
+      const { computeSha256 } = await import('../src/file-safety/snapshot-store.js');
+      const postHash = computeSha256(Buffer.from('Initial content'));
+
+      // Modify the file externally
+      fs.writeFileSync(filePath, 'Modified content');
+
+      const action = createTestAction({
+        actionType: 'file_change',
+        postHash,
+        parameters: { filePath, operation: 'create' },
+      });
+
+      const results = await controller.execute([action.id], async () => 'overwrite');
+
+      expect(results.length).toBe(1);
+      expect(results[0].success).toBe(true);
+      expect(results[0].outcome).toBe('file_restored');
+
+      // File should be deleted
+      expect(fs.existsSync(filePath)).toBe(false);
+    });
+
+    it('should fail if file was modified externally and no conflictResolver is provided', async () => {
+      const filePath = path.join(tempDir, 'created-conflict-fail.txt');
+      fs.writeFileSync(filePath, 'Initial content');
+
+      const { computeSha256 } = await import('../src/file-safety/snapshot-store.js');
+      const postHash = computeSha256(Buffer.from('Initial content'));
+
+      // Modify the file externally
+      fs.writeFileSync(filePath, 'Modified content');
+
+      const action = createTestAction({
+        actionType: 'file_change',
+        postHash,
+        parameters: { filePath, operation: 'create' },
+      });
+
+      const results = await controller.execute([action.id]);
+
+      expect(results.length).toBe(1);
+      expect(results[0].success).toBe(false);
+      expect(results[0].outcome).toBe('error');
+      expect(results[0].error).toContain('conflict detected');
+
+      // File should still exist
+      expect(fs.existsSync(filePath)).toBe(true);
+    });
+  });
 });

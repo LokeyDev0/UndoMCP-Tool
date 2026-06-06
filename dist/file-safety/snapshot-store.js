@@ -51,4 +51,10 @@ export class SnapshotStore {
             return null;
         }
     }
+    /**
+     * Associates a snapshot with an action.
+     */
+    associateAction(snapshotId, actionId) {
+        this.dbManager.updateSnapshotActionId(snapshotId, actionId);
+    }
 }

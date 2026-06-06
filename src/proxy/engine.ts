@@ -9,6 +9,8 @@ import { InverseResolver } from '../undo/inverse-resolver.js';
 import { UndoController } from '../undo/undo-controller.js';
 import { LlmSolver } from '../undo/llm-solver.js';
 import { UpstreamManager } from './upstream-manager.js';
+import { WorkspaceFileWatcher } from '../file-safety/file-watcher.js';
+import { ShadowStore } from '../file-safety/shadow-store.js';
 import {
   UNDO_TOOLS,
   handleInteractive,
@@ -56,6 +58,9 @@ export class ProxyEngine {
   private activeRequests = new Map<string | number, { request: any; actionId?: string; startTime: number }>();
   
   private agentReader!: readline.Interface;
+  private fileWatcher?: WorkspaceFileWatcher;
+  private shadowStore?: ShadowStore;
+  public watcherPromise: Promise<void> | null = null;
 
   constructor(options: ProxyEngineOptions) {
     this.command = options.command;
@@ -101,6 +106,71 @@ export class ProxyEngine {
         });
       }
       this.undoController = new UndoController(this.dbManager, snapshotStore, this.schemaCache, inverseResolver, llmSolver);
+
+      const session = this.sessionId ? this.dbManager.getSession(this.sessionId) : null;
+      const workspacePath = session?.workingDirectory || process.cwd();
+
+      if (workspacePath) {
+        this.fileWatcher = new WorkspaceFileWatcher({
+          workspacePath,
+          onEvents: async (events) => {
+            if (!this.sessionId) return;
+            for (const event of events) {
+              const actionId = `act_${nanoid()}`;
+              try {
+                const activeTurnId = this.ensureActiveTurnId();
+                
+                const action: Action = {
+                  id: actionId,
+                  sessionId: this.sessionId,
+                  turnId: activeTurnId,
+                  sequenceNum: this.nextSequenceNum++,
+                  timestamp: event.timestamp,
+                  actionType: 'file_change',
+                  state: 'executed',
+                  parameters: {
+                    filePath: event.path,
+                    operation: event.type
+                  }
+                };
+                
+                this.dbManager!.createAction(action);
+                
+                const transition = this.shadowStore?.updateFileState(event.path, actionId, event.type);
+                if (transition) {
+                  this.dbManager!.updateActionTransition(
+                    actionId,
+                    transition.preSnapshotId,
+                    transition.postSnapshotId,
+                    transition.preHash,
+                    transition.postHash
+                  );
+                  
+                  this.dbManager!.updateActionResults(
+                    actionId,
+                    true,
+                    undefined,
+                    0,
+                    transition.postHash
+                  );
+                } else {
+                  this.dbManager!.deleteAction(actionId);
+                  this.nextSequenceNum--;
+                }
+              } catch (err: any) {
+                console.error(`[undomcp] Failed to log file change action: ${err.message}`);
+              }
+            }
+          }
+        });
+
+        this.shadowStore = new ShadowStore(
+          this.dbManager,
+          snapshotStore,
+          workspacePath,
+          (filePath) => this.fileWatcher ? this.fileWatcher.isIgnored(filePath) : false
+        );
+      }
     }
   }
 
@@ -129,6 +199,20 @@ export class ProxyEngine {
     agentStderr: Writable = process.stderr
   ): void {
     this.isStopping = false;
+
+    if (this.shadowStore) {
+      try {
+        this.shadowStore.initializeIndex();
+      } catch (err: any) {
+        console.error(`[undomcp] Failed to initialize shadow store index: ${err.message}`);
+      }
+    }
+
+    if (this.fileWatcher) {
+      this.watcherPromise = this.fileWatcher.start().catch((err: any) => {
+        console.error(`[undomcp] Failed to start file watcher: ${err.message}`);
+      });
+    }
 
     // Start all configured upstreams
     this.upstreamManager.start(agentStderr);
@@ -161,6 +245,11 @@ export class ProxyEngine {
     this.isStopping = true;
     this.cleanup();
     this.upstreamManager.stop();
+    if (this.fileWatcher) {
+      this.fileWatcher.stop().catch((err: any) => {
+        console.error(`[undomcp] Failed to stop file watcher: ${err.message}`);
+      });
+    }
   }
 
   private cleanup(): void {
@@ -298,58 +387,7 @@ export class ProxyEngine {
             const baseToolName = parts.length > 1 ? parts[1] : toolName;
 
             // Turn clustering
-            if (!this.turnId) {
-              const lastTurn = this.dbManager.getLastTurnForSession(this.sessionId);
-              if (lastTurn) {
-                if (this.lastActionEndTime === undefined) {
-                  const lastActionTimeStr = this.dbManager.getLastActionTimestampForSession(this.sessionId);
-                  if (lastActionTimeStr) {
-                    this.lastActionEndTime = Date.parse(lastActionTimeStr);
-                  }
-                }
-                if (this.lastActionEndTime !== undefined && (Date.now() - this.lastActionEndTime > this.turnIdleTimeoutMs)) {
-                  const nextTurnNum = lastTurn.turnNum + 1;
-                  this.turnId = `turn_${nanoid()}`;
-                  this.dbManager.createTurn({
-                    id: this.turnId,
-                    sessionId: this.sessionId,
-                    turnNum: nextTurnNum,
-                    timestamp: new Date().toISOString(),
-                    actionCount: 0
-                  });
-                } else {
-                  this.turnId = lastTurn.id;
-                }
-              } else {
-                this.turnId = `turn_${nanoid()}`;
-                this.dbManager.createTurn({
-                  id: this.turnId,
-                  sessionId: this.sessionId,
-                  turnNum: 1,
-                  timestamp: new Date().toISOString(),
-                  actionCount: 0
-                });
-              }
-            } else {
-              if (this.lastActionEndTime === undefined) {
-                const lastActionTimeStr = this.dbManager.getLastActionTimestampForSession(this.sessionId);
-                if (lastActionTimeStr) {
-                  this.lastActionEndTime = Date.parse(lastActionTimeStr);
-                }
-              }
-              if (this.lastActionEndTime !== undefined && (Date.now() - this.lastActionEndTime > this.turnIdleTimeoutMs)) {
-                const lastTurn = this.dbManager.getLastTurnForSession(this.sessionId);
-                const nextTurnNum = lastTurn ? lastTurn.turnNum + 1 : 1;
-                this.turnId = `turn_${nanoid()}`;
-                this.dbManager.createTurn({
-                  id: this.turnId,
-                  sessionId: this.sessionId,
-                  turnNum: nextTurnNum,
-                  timestamp: new Date().toISOString(),
-                  actionCount: 0
-                });
-              }
-            }
+            this.ensureActiveTurnId();
 
             actionId = `act_${nanoid()}`;
 
@@ -635,5 +673,61 @@ export class ProxyEngine {
     if (!agentStdout.destroyed) {
       agentStdout.write(line + '\n');
     }
+  }
+
+  private ensureActiveTurnId(): string {
+    if (!this.dbManager || !this.sessionId) {
+      throw new Error('DatabaseManager and SessionId must be initialized');
+    }
+    
+    if (this.lastActionEndTime === undefined) {
+      const lastActionTimeStr = this.dbManager.getLastActionTimestampForSession(this.sessionId);
+      if (lastActionTimeStr) {
+        this.lastActionEndTime = Date.parse(lastActionTimeStr);
+      }
+    }
+
+    const lastTurn = this.dbManager.getLastTurnForSession(this.sessionId);
+    
+    if (!this.turnId) {
+      if (lastTurn) {
+        if (this.lastActionEndTime !== undefined && (Date.now() - this.lastActionEndTime > this.turnIdleTimeoutMs)) {
+          const nextTurnNum = lastTurn.turnNum + 1;
+          this.turnId = `turn_${nanoid()}`;
+          this.dbManager.createTurn({
+            id: this.turnId,
+            sessionId: this.sessionId,
+            turnNum: nextTurnNum,
+            timestamp: new Date().toISOString(),
+            actionCount: 0
+          });
+        } else {
+          this.turnId = lastTurn.id;
+        }
+      } else {
+        this.turnId = `turn_${nanoid()}`;
+        this.dbManager.createTurn({
+          id: this.turnId,
+          sessionId: this.sessionId,
+          turnNum: 1,
+          timestamp: new Date().toISOString(),
+          actionCount: 0
+        });
+      }
+    } else {
+      if (lastTurn && this.lastActionEndTime !== undefined && (Date.now() - this.lastActionEndTime > this.turnIdleTimeoutMs)) {
+        const nextTurnNum = lastTurn.turnNum + 1;
+        this.turnId = `turn_${nanoid()}`;
+        this.dbManager.createTurn({
+          id: this.turnId,
+          sessionId: this.sessionId,
+          turnNum: nextTurnNum,
+          timestamp: new Date().toISOString(),
+          actionCount: 0
+        });
+      }
+    }
+
+    return this.turnId;
   }
 }

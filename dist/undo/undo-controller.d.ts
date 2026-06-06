@@ -79,4 +79,8 @@ export declare class UndoController {
      * Handles file restore with conflict detection.
      */
     private executeFileAction;
+    /**
+     * Handles file delete (undoing a create) with conflict detection.
+     */
+    private executeFileDeleteAction;
 }

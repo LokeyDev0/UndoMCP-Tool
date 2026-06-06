@@ -160,7 +160,7 @@ export class ShadowStore {
       const preSnapshotId = existing?.snapshotId;
       const preHash = existing?.sha256;
 
-      const postSnapshotId = this.snapshotStore.createSnapshot(actionId, absolutePath, content, 'post');
+      const postSnapshotId = this.snapshotStore.createSnapshot(undefined, absolutePath, content, 'post');
 
       this.dbManager.setFileIndex({
         filePath: absolutePath,

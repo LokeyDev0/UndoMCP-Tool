@@ -167,6 +167,29 @@ export class DatabaseManager {
     `;
         this.db.prepare(query).run(state, undoneAt || null, undoResult ? JSON.stringify(undoResult) : null, undoError || null, actionId);
     }
+    updateActionTransition(actionId, preSnapshotId, postSnapshotId, preHash, postHash) {
+        const query = `
+      UPDATE actions
+      SET pre_snapshot_id = ?, post_snapshot_id = ?, pre_hash = ?, post_hash = ?
+      WHERE id = ?
+    `;
+        this.db.prepare(query).run(preSnapshotId || null, postSnapshotId || null, preHash || null, postHash || null, actionId);
+    }
+    deleteAction(actionId) {
+        const action = this.getAction(actionId);
+        this.db.prepare('DELETE FROM actions WHERE id = ?').run(actionId);
+        if (action && action.turnId) {
+            this.decrementTurnActionCount(action.turnId);
+        }
+    }
+    decrementTurnActionCount(turnId) {
+        const query = `
+      UPDATE turns
+      SET action_count = MAX(0, action_count - 1)
+      WHERE id = ?
+    `;
+        this.db.prepare(query).run(turnId);
+    }
     getAction(actionId) {
         const row = this.db.prepare('SELECT * FROM actions WHERE id = ?').get(actionId);
         if (!row)
@@ -236,6 +259,14 @@ export class DatabaseManager {
             sha256: row.sha256,
             createdAt: row.created_at
         };
+    }
+    updateSnapshotActionId(snapshotId, actionId) {
+        const query = `
+      UPDATE snapshots
+      SET action_id = ?
+      WHERE id = ?
+    `;
+        this.db.prepare(query).run(actionId, snapshotId);
     }
     // --- File Index Methods ---
     setFileIndex(entry) {

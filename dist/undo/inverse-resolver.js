@@ -68,6 +68,18 @@ export class InverseResolver {
     resolveFileShadow(action) {
         if (action.actionType !== 'file_change')
             return null;
+        if (action.parameters?.operation === 'create') {
+            return {
+                inverseTool: '__file_delete__',
+                inverseParams: {
+                    filePath: action.parameters?.filePath || action.parameters?.path || '',
+                    postHash: action.postHash,
+                },
+                source: 'filesystem_shadow',
+                confidence: 1.0,
+                reversibilityClass: 'A',
+            };
+        }
         if (!action.preSnapshotId)
             return null;
         // For file changes, the inverse is "restore from pre-snapshot".

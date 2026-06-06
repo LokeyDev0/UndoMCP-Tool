@@ -51,6 +51,24 @@ describe('InverseResolver', () => {
 
       expect(resolver.resolve(action)).toBeNull();
     });
+
+    it('should resolve create file_change action to __file_delete__', () => {
+      const action = makeAction({
+        actionType: 'file_change',
+        parameters: { filePath: '/workspace/test.txt', operation: 'create' },
+        postHash: 'hash_abc123'
+      });
+
+      const result = resolver.resolve(action);
+
+      expect(result).toBeTruthy();
+      expect(result!.reversibilityClass).toBe('A');
+      expect(result!.confidence).toBe(1.0);
+      expect(result!.source).toBe('filesystem_shadow');
+      expect(result!.inverseTool).toBe('__file_delete__');
+      expect(result!.inverseParams.filePath).toBe('/workspace/test.txt');
+      expect(result!.inverseParams.postHash).toBe('hash_abc123');
+    });
   });
 
   describe('Verb-pair heuristic resolution (Class B)', () => {

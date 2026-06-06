@@ -16,16 +16,19 @@ describe('ProxyEngine Turn Tracking and Clustering', () => {
   let dbManager: DatabaseManager;
   const sessionId = 'turn_test_sess_123';
 
+  let tempSessionDir: string;
+
   beforeEach(() => {
     const tempDir = os.tmpdir();
     tempDbPath = path.join(tempDir, `undomcp_turn_test_${Date.now()}_${Math.random().toString(36).substring(7)}.db`);
     dbManager = new DatabaseManager(tempDbPath);
+    tempSessionDir = fs.mkdtempSync(path.join(tempDir, 'undomcp-turn-sess-'));
 
     // Create session
     dbManager.createSession({
       id: sessionId,
       startedAt: new Date().toISOString(),
-      workingDirectory: process.cwd()
+      workingDirectory: tempSessionDir
     });
   });
 
@@ -40,6 +43,9 @@ describe('ProxyEngine Turn Tracking and Clustering', () => {
       }
       if (fs.existsSync(`${tempDbPath}-shm`)) {
         fs.unlinkSync(`${tempDbPath}-shm`);
+      }
+      if (fs.existsSync(tempSessionDir)) {
+        fs.rmSync(tempSessionDir, { recursive: true, force: true });
       }
     } catch (err) {
       console.error('Clean up error', err);

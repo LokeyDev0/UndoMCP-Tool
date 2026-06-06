@@ -121,6 +121,11 @@ export class UndoController {
                     results.push(result);
                     continue;
                 }
+                if (resolution.reversibilityClass === 'A' && resolution.inverseTool === '__file_delete__') {
+                    const result = await this.executeFileDeleteAction(action, resolution, conflictResolver);
+                    results.push(result);
+                    continue;
+                }
                 // Class B/C: MCP compensating call
                 this.dbManager.updateActionState(action.id, 'undone', new Date().toISOString(), { inverseTool: resolution.inverseTool, inverseParams: resolution.inverseParams });
                 results.push({
@@ -240,5 +245,67 @@ export class UndoController {
             outcome: 'error',
             error: `Failed to restore file from snapshot ${snapshotId}`,
         };
+    }
+    /**
+     * Handles file delete (undoing a create) with conflict detection.
+     */
+    async executeFileDeleteAction(action, resolution, conflictResolver) {
+        const filePath = resolution.inverseParams.filePath;
+        const absolutePath = path.resolve(filePath);
+        // If file does not exist, consider it already deleted (successful undo)
+        if (!fs.existsSync(absolutePath)) {
+            this.dbManager.updateActionState(action.id, 'undone', new Date().toISOString(), { deletedFilePath: filePath });
+            return {
+                actionId: action.id,
+                success: true,
+                outcome: 'file_restored',
+            };
+        }
+        // Conflict detection: check if the file has been modified externally
+        if (action.postHash) {
+            const hashMatches = verifyFileHash(absolutePath, action.postHash);
+            if (!hashMatches) {
+                // File was modified externally after logging
+                if (conflictResolver) {
+                    const decision = await conflictResolver(filePath);
+                    if (decision === 'exit') {
+                        return {
+                            actionId: action.id,
+                            success: true,
+                            outcome: 'skipped',
+                        };
+                    }
+                    // User chose 'overwrite' — proceed with delete
+                }
+                else {
+                    // No conflict resolver provided — skip
+                    return {
+                        actionId: action.id,
+                        success: false,
+                        outcome: 'error',
+                        error: `File conflict detected for ${filePath}. File was modified externally.`,
+                    };
+                }
+            }
+        }
+        try {
+            fs.unlinkSync(absolutePath);
+            this.dbManager.updateActionState(action.id, 'undone', new Date().toISOString(), { deletedFilePath: filePath });
+            return {
+                actionId: action.id,
+                success: true,
+                outcome: 'file_restored',
+                conflictOverwritten: action.postHash ? !verifyFileHash(absolutePath, action.postHash) : undefined,
+            };
+        }
+        catch (err) {
+            this.dbManager.updateActionState(action.id, 'undo_failed', new Date().toISOString(), undefined, `Failed to delete file: ${err.message}`);
+            return {
+                actionId: action.id,
+                success: false,
+                outcome: 'error',
+                error: `Failed to delete file: ${err.message}`,
+            };
+        }
     }
 }

@@ -322,6 +322,44 @@ export class DatabaseManager {
     );
   }
 
+  public updateActionTransition(
+    actionId: string,
+    preSnapshotId?: string,
+    postSnapshotId?: string,
+    preHash?: string,
+    postHash?: string
+  ): void {
+    const query = `
+      UPDATE actions
+      SET pre_snapshot_id = ?, post_snapshot_id = ?, pre_hash = ?, post_hash = ?
+      WHERE id = ?
+    `;
+    this.db.prepare(query).run(
+      preSnapshotId || null,
+      postSnapshotId || null,
+      preHash || null,
+      postHash || null,
+      actionId
+    );
+  }
+
+  public deleteAction(actionId: string): void {
+    const action = this.getAction(actionId);
+    this.db.prepare('DELETE FROM actions WHERE id = ?').run(actionId);
+    if (action && action.turnId) {
+      this.decrementTurnActionCount(action.turnId);
+    }
+  }
+
+  public decrementTurnActionCount(turnId: string): void {
+    const query = `
+      UPDATE turns
+      SET action_count = MAX(0, action_count - 1)
+      WHERE id = ?
+    `;
+    this.db.prepare(query).run(turnId);
+  }
+
   public getAction(actionId: string): Action | null {
     const row = this.db.prepare('SELECT * FROM actions WHERE id = ?').get(actionId) as any;
     if (!row) return null;
@@ -405,6 +443,15 @@ export class DatabaseManager {
       sha256: row.sha256,
       createdAt: row.created_at
     };
+  }
+
+  public updateSnapshotActionId(snapshotId: string, actionId: string): void {
+    const query = `
+      UPDATE snapshots
+      SET action_id = ?
+      WHERE id = ?
+    `;
+    this.db.prepare(query).run(actionId, snapshotId);
   }
 
   // --- File Index Methods ---

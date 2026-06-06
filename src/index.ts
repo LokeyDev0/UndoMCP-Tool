@@ -4,6 +4,12 @@ import { DatabaseManager } from './journal/database-manager.js';
 import { ProxyEngine } from './proxy/engine.js';
 import { handleInteractive } from './tools/undo-tools.js';
 import { nanoid } from 'nanoid';
+import { UndoController } from './undo/undo-controller.js';
+import { SnapshotStore } from './file-safety/snapshot-store.js';
+import { SchemaCache } from './undo/schema-cache.js';
+import { InverseResolver } from './undo/inverse-resolver.js';
+import { LlmSolver } from './undo/llm-solver.js';
+import { runTui } from './utils/tui.js';
 
 const program = new Command();
 
@@ -107,9 +113,27 @@ if (process.argv.length <= 2) {
     }
 
     if (isActive && latestSession) {
-      console.log(`Active session found: ${latestSession.id}`);
-      const checklist = handleInteractive(dbManager, latestSession.id);
-      console.log('\n' + checklist);
+      if (process.stdin.isTTY) {
+        const snapshotStore = new SnapshotStore(dbManager);
+        const schemaCache = new SchemaCache();
+        const inverseResolver = new InverseResolver(schemaCache);
+        let llmSolver: LlmSolver | undefined;
+        const llmEnabled = process.env.UNDOMCP_LLM_ENABLED === 'true';
+        if (llmEnabled) {
+          llmSolver = new LlmSolver({
+            enabled: true,
+            endpoint: process.env.UNDOMCP_LLM_ENDPOINT,
+            model: process.env.UNDOMCP_LLM_MODEL,
+            apiKey: process.env.UNDOMCP_LLM_API_KEY
+          });
+        }
+        const undoController = new UndoController(dbManager, snapshotStore, schemaCache, inverseResolver, llmSolver);
+        await runTui(dbManager, undoController, latestSession.id);
+      } else {
+        console.log(`Active session found: ${latestSession.id}`);
+        const checklist = handleInteractive(dbManager, latestSession.id);
+        console.log('\n' + checklist);
+      }
     } else {
       console.log('No active session found. undomcp is active when run as a proxy inside an AI agent.');
     }

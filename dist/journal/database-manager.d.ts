@@ -88,12 +88,16 @@ export declare class DatabaseManager {
     createAction(action: Action): void;
     updateActionResults(actionId: string, success: boolean, resultData?: Record<string, any>, latencyMs?: number, postHash?: string): void;
     updateActionState(actionId: string, state: 'executed' | 'undone' | 'undo_failed', undoneAt?: string, undoResult?: Record<string, any>, undoError?: string): void;
+    updateActionTransition(actionId: string, preSnapshotId?: string, postSnapshotId?: string, preHash?: string, postHash?: string): void;
+    deleteAction(actionId: string): void;
+    decrementTurnActionCount(turnId: string): void;
     getAction(actionId: string): Action | null;
     getActionsForSession(sessionId: string): Action[];
     getActionsForTurn(turnId: string): Action[];
     private mapRowToAction;
     createSnapshot(snapshot: Snapshot): void;
     getSnapshot(snapshotId: string): Snapshot | null;
+    updateSnapshotActionId(snapshotId: string, actionId: string): void;
     setFileIndex(entry: FileIndexEntry): void;
     getFileIndex(filePath: string): FileIndexEntry | null;
     deleteFileIndex(filePath: string): void;

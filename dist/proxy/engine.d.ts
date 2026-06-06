@@ -32,6 +32,9 @@ export declare class ProxyEngine {
     private upstreamManager;
     private activeRequests;
     private agentReader;
+    private fileWatcher?;
+    private shadowStore?;
+    watcherPromise: Promise<void> | null;
     constructor(options: ProxyEngineOptions);
     /**
      * Updates the active turn ID dynamically.
@@ -56,4 +59,5 @@ export declare class ProxyEngine {
     private executeCompensatingCall;
     private handleUndoToolCall;
     private forwardToAgent;
+    private ensureActiveTurnId;
 }

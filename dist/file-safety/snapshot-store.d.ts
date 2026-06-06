@@ -15,4 +15,8 @@ export declare class SnapshotStore {
      * Retrieves and decompresses the snapshot content from the database.
      */
     getSnapshotContent(snapshotId: string): Buffer | null;
+    /**
+     * Associates a snapshot with an action.
+     */
+    associateAction(snapshotId: string, actionId: string): void;
 }
