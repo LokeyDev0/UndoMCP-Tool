@@ -46,4 +46,9 @@ export declare class InverseResolver {
      * and original parameters in priority order.
      */
     private findValueForParam;
+    /**
+     * Generic fallback for creation tools that do not have a direct delete tool.
+     * Looks for a patch/update tool that takes an ID and has a soft-delete boolean parameter.
+     */
+    private resolvePatchArchive;
 }

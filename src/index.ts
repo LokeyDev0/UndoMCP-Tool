@@ -2,14 +2,8 @@
 import { Command } from 'commander';
 import { DatabaseManager } from './journal/database-manager.js';
 import { ProxyEngine } from './proxy/engine.js';
-import { handleInteractive } from './tools/undo-tools.js';
+import { handleListHistory } from './tools/undo-tools.js';
 import { nanoid } from 'nanoid';
-import { UndoController } from './undo/undo-controller.js';
-import { SnapshotStore } from './file-safety/snapshot-store.js';
-import { SchemaCache } from './undo/schema-cache.js';
-import { InverseResolver } from './undo/inverse-resolver.js';
-import { LlmSolver } from './undo/llm-solver.js';
-import { runTui } from './utils/tui.js';
 
 const program = new Command();
 
@@ -32,17 +26,19 @@ program
     const dbManager = new DatabaseManager(dbPath);
     const sessionId = options.sessionId || `sess_${nanoid()}`;
 
+    // Determine working directory: prefer explicit env var over process.cwd()
+    const workingDir = process.env.UNDOMCP_PROJECT_DIR || process.cwd();
+
     // Initialize session in database
     dbManager.createSession({
       id: sessionId,
       startedAt: new Date().toISOString(),
-      workingDirectory: process.cwd()
+      workingDirectory: workingDir
     });
 
     const parsedArgs: string[] = [];
     if (options.args) {
       if (Array.isArray(options.args)) {
-        // If commander parsed it as array (e.g. --args a b c or --args a --args b)
         parsedArgs.push(...options.args);
       } else {
         parsedArgs.push(...(options.args as string).split(/\s+/));
@@ -90,52 +86,43 @@ program
   .description('Configure AI agent clients to route tools through undomcp')
   .option('--restore', 'Restore original configuration prior to undomcp setup')
   .option('--binary-path <path>', 'Absolute path to the undomcp binary')
+  .option('--all', 'Configure all detected IDEs without interactive selection')
   .action(async (options) => {
     const { runSetup } = await import('./commands/setup.js');
     await runSetup(options);
   });
 
+// Uninstall subcommand
+program
+  .command('uninstall')
+  .description('Completely remove undomcp: restore MCP configs, remove skills, delete journal database')
+  .option('--keep-db', 'Keep the journal database (only remove configs and skills)')
+  .action(async (options) => {
+    const { runUninstall } = await import('./commands/uninstall.js');
+    await runUninstall(options);
+  });
+
+// Clear history subcommand
+program
+  .command('clearHistory')
+  .description('Clear the journal database (delete all recorded MCP call history)')
+  .action(async () => {
+    const { runClearHistory } = await import('./commands/clear-history.js');
+    await runClearHistory();
+  });
 
 // Handle default command (no arguments)
 if (process.argv.length <= 2) {
   const dbManager = new DatabaseManager();
   try {
-    const latestSession = dbManager.getLatestSession();
-    let isActive = false;
-
-    if (latestSession && !latestSession.endedAt) {
-      // Check if session started in the last 1 hour
-      const oneHourAgo = Date.now() - 60 * 60 * 1000;
-      const startTime = Date.parse(latestSession.startedAt);
-      if (startTime > oneHourAgo) {
-        isActive = true;
-      }
-    }
-
-    if (isActive && latestSession) {
-      if (process.stdin.isTTY) {
-        const snapshotStore = new SnapshotStore(dbManager);
-        const schemaCache = new SchemaCache();
-        const inverseResolver = new InverseResolver(schemaCache);
-        let llmSolver: LlmSolver | undefined;
-        const llmEnabled = process.env.UNDOMCP_LLM_ENABLED === 'true';
-        if (llmEnabled) {
-          llmSolver = new LlmSolver({
-            enabled: true,
-            endpoint: process.env.UNDOMCP_LLM_ENDPOINT,
-            model: process.env.UNDOMCP_LLM_MODEL,
-            apiKey: process.env.UNDOMCP_LLM_API_KEY
-          });
-        }
-        const undoController = new UndoController(dbManager, snapshotStore, schemaCache, inverseResolver, llmSolver);
-        await runTui(dbManager, undoController, latestSession.id);
-      } else {
-        console.log(`Active session found: ${latestSession.id}`);
-        const checklist = handleInteractive(dbManager, latestSession.id);
-        console.log('\n' + checklist);
-      }
+    const workingDir = process.cwd();
+    const history = handleListHistory(dbManager, workingDir, 10);
+    if (history.length > 0) {
+      console.log(`Project: ${workingDir}`);
+      console.log('\nRecent MCP Actions:');
+      console.log(JSON.stringify(history, null, 2));
     } else {
-      console.log('No active session found. undomcp is active when run as a proxy inside an AI agent.');
+      console.log('No MCP actions found for this project.');
     }
   } catch (err: any) {
     console.error(`[undomcp] Error reading journal: ${err.message}`);

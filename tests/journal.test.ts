@@ -52,7 +52,8 @@ describe('DatabaseManager & Journaling System', () => {
     const retrieved = dbManager.getSession('sess_1');
     expect(retrieved).not.toBeNull();
     expect(retrieved?.id).toBe(session.id);
-    expect(retrieved?.workingDirectory).toBe(session.workingDirectory);
+    // Working directory is normalized on insert (path.resolve + lowercase + forward slashes)
+    expect(retrieved?.workingDirectory).toBe(dbManager.normalizePath(session.workingDirectory!));
     expect(retrieved?.configHash).toBe(session.configHash);
     expect(retrieved?.metadata).toEqual(session.metadata);
     expect(retrieved?.endedAt).toBeUndefined();

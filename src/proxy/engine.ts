@@ -1,24 +1,13 @@
-import { spawn, ChildProcess } from 'child_process';
+import { spawn } from 'child_process';
 import * as readline from 'readline';
 import { Readable, Writable } from 'stream';
 import { DatabaseManager, Action, Turn } from '../journal/database-manager.js';
-import { SchemaCache } from '../undo/schema-cache.js';
 import { nanoid } from 'nanoid';
-import { SnapshotStore } from '../file-safety/snapshot-store.js';
-import { InverseResolver } from '../undo/inverse-resolver.js';
-import { UndoController } from '../undo/undo-controller.js';
-import { LlmSolver } from '../undo/llm-solver.js';
 import { UpstreamManager } from './upstream-manager.js';
-import { WorkspaceFileWatcher } from '../file-safety/file-watcher.js';
-import { ShadowStore } from '../file-safety/shadow-store.js';
 import {
   UNDO_TOOLS,
-  handleInteractive,
-  handleListTurns,
-  handlePreviewUndo,
-  handleUndoSelection
+  handleListHistory
 } from '../tools/undo-tools.js';
-
 
 export interface ProxyEngineOptions {
   command: string;
@@ -49,18 +38,10 @@ export class ProxyEngine {
   private nextSequenceNum = 1;
   private turnIdleTimeoutMs = 180000; // default 3 minutes
   private lastActionEndTime?: number;
-  private schemaCache: SchemaCache = new SchemaCache();
-  private undoController: UndoController | null = null;
-  private pendingCompensations = new Map<string | number, (response: any) => void>();
   private upstreamManager: UpstreamManager;
   
-  // Track active requests by their JSON-RPC ID to map responses back
   private activeRequests = new Map<string | number, { request: any; actionId?: string; startTime: number }>();
-  
   private agentReader!: readline.Interface;
-  private fileWatcher?: WorkspaceFileWatcher;
-  private shadowStore?: ShadowStore;
-  public watcherPromise: Promise<void> | null = null;
 
   constructor(options: ProxyEngineOptions) {
     this.command = options.command;
@@ -91,104 +72,7 @@ export class ProxyEngine {
       command: this.command,
       args: this.args
     });
-
-    if (this.dbManager) {
-      const snapshotStore = new SnapshotStore(this.dbManager);
-      const inverseResolver = new InverseResolver(this.schemaCache);
-      let llmSolver: LlmSolver | undefined;
-      const llmEnabled = process.env.UNDOMCP_LLM_ENABLED === 'true';
-      if (llmEnabled) {
-        llmSolver = new LlmSolver({
-          enabled: true,
-          endpoint: process.env.UNDOMCP_LLM_ENDPOINT,
-          model: process.env.UNDOMCP_LLM_MODEL,
-          apiKey: process.env.UNDOMCP_LLM_API_KEY
-        });
-      }
-      this.undoController = new UndoController(this.dbManager, snapshotStore, this.schemaCache, inverseResolver, llmSolver);
-
-      const session = this.sessionId ? this.dbManager.getSession(this.sessionId) : null;
-      const workspacePath = session?.workingDirectory || process.cwd();
-
-      if (workspacePath) {
-        this.fileWatcher = new WorkspaceFileWatcher({
-          workspacePath,
-          onEvents: async (events) => {
-            if (!this.sessionId) return;
-            for (const event of events) {
-              const actionId = `act_${nanoid()}`;
-              try {
-                const activeTurnId = this.ensureActiveTurnId();
-                
-                const action: Action = {
-                  id: actionId,
-                  sessionId: this.sessionId,
-                  turnId: activeTurnId,
-                  sequenceNum: this.nextSequenceNum++,
-                  timestamp: event.timestamp,
-                  actionType: 'file_change',
-                  state: 'executed',
-                  parameters: {
-                    filePath: event.path,
-                    operation: event.type
-                  }
-                };
-                
-                this.dbManager!.createAction(action);
-                
-                const transition = this.shadowStore?.updateFileState(event.path, actionId, event.type);
-                if (transition) {
-                  this.dbManager!.updateActionTransition(
-                    actionId,
-                    transition.preSnapshotId,
-                    transition.postSnapshotId,
-                    transition.preHash,
-                    transition.postHash
-                  );
-                  
-                  this.dbManager!.updateActionResults(
-                    actionId,
-                    true,
-                    undefined,
-                    0,
-                    transition.postHash
-                  );
-                } else {
-                  this.dbManager!.deleteAction(actionId);
-                  this.nextSequenceNum--;
-                }
-              } catch (err: any) {
-                console.error(`[undomcp] Failed to log file change action: ${err.message}`);
-              }
-            }
-          }
-        });
-
-        this.shadowStore = new ShadowStore(
-          this.dbManager,
-          snapshotStore,
-          workspacePath,
-          (filePath) => this.fileWatcher ? this.fileWatcher.isIgnored(filePath) : false
-        );
-      }
-    }
   }
-
-
-  /**
-   * Updates the active turn ID dynamically.
-   */
-  public setTurnId(turnId: string | undefined): void {
-    this.turnId = turnId;
-  }
-
-  /**
-   * Returns the schema cache, populated from upstream tools/list responses.
-   */
-  public getSchemaCache(): SchemaCache {
-    return this.schemaCache;
-  }
-
 
   /**
    * Starts the proxy engine by spawning the upstream processes and connecting streams.
@@ -199,20 +83,6 @@ export class ProxyEngine {
     agentStderr: Writable = process.stderr
   ): void {
     this.isStopping = false;
-
-    if (this.shadowStore) {
-      try {
-        this.shadowStore.initializeIndex();
-      } catch (err: any) {
-        console.error(`[undomcp] Failed to initialize shadow store index: ${err.message}`);
-      }
-    }
-
-    if (this.fileWatcher) {
-      this.watcherPromise = this.fileWatcher.start().catch((err: any) => {
-        console.error(`[undomcp] Failed to start file watcher: ${err.message}`);
-      });
-    }
 
     // Start all configured upstreams
     this.upstreamManager.start(agentStderr);
@@ -245,11 +115,6 @@ export class ProxyEngine {
     this.isStopping = true;
     this.cleanup();
     this.upstreamManager.stop();
-    if (this.fileWatcher) {
-      this.fileWatcher.stop().catch((err: any) => {
-        console.error(`[undomcp] Failed to stop file watcher: ${err.message}`);
-      });
-    }
   }
 
   private cleanup(): void {
@@ -331,7 +196,6 @@ export class ProxyEngine {
         }
         try {
           const allTools = await this.upstreamManager.listAllTools();
-          this.schemaCache.updateFromToolsList({ tools: allTools });
           const aggregatedTools = [...allTools, ...UNDO_TOOLS];
           const response = {
             jsonrpc: '2.0',
@@ -376,16 +240,16 @@ export class ProxyEngine {
           return;
         }
 
-        // Journaling tool call
+        // Journaling tool call — log all MCP calls for full audit trail
         let actionId: string | undefined;
         const startTime = Date.now();
 
+        const parts = toolName.split('__');
+        const namespace = parts.length > 1 ? parts[0] : undefined;
+        const baseToolName = parts.length > 1 ? parts[1] : toolName;
+
         if (this.dbManager && this.sessionId) {
           try {
-            const parts = toolName.split('__');
-            const namespace = parts.length > 1 ? parts[0] : undefined;
-            const baseToolName = parts.length > 1 ? parts[1] : toolName;
-
             // Turn clustering
             this.ensureActiveTurnId();
 
@@ -523,23 +387,6 @@ export class ProxyEngine {
     }
   }
 
-  private async executeCompensatingCall(toolName: string, args: Record<string, any>): Promise<any> {
-    const parts = toolName.split('__');
-    let ns = this.upstreamManager.getNamespaces()[0] || 'default';
-    let baseToolName = toolName;
-
-    if (parts.length > 1 && this.upstreamManager.getNamespaces().includes(parts[0])) {
-      ns = parts[0];
-      baseToolName = parts[1];
-    }
-    
-    const callId = `proxy_compensate_${nanoid()}`;
-    return this.upstreamManager.callUpstreamDirect(ns, 'tools/call', {
-      name: baseToolName,
-      arguments: args
-    }, callId);
-  }
-
   private async handleUndoToolCall(request: any, agentStdout: Writable): Promise<void> {
     const toolName = request.params?.name;
     const args = request.params?.arguments || {};
@@ -551,99 +398,20 @@ export class ProxyEngine {
       return;
     }
 
-    if (!this.dbManager || !this.sessionId || !this.undoController) {
+    if (!this.dbManager || !this.sessionId) {
       error = {
         code: -32603,
-        message: 'DatabaseManager, Session ID, or UndoController is not configured on the proxy.'
+        message: 'DatabaseManager or Session ID is not configured on the proxy.'
       };
     } else {
       try {
-        if (toolName === 'undomcp_interactive') {
-          const text = handleInteractive(this.dbManager, this.sessionId);
-          result = { content: [{ type: 'text', text }] };
-        } else if (toolName === 'undomcp_list_turns') {
-          const limit = args.limit !== undefined ? Number(args.limit) : 20;
-          const list = handleListTurns(this.dbManager, this.sessionId, limit);
+        if (toolName === 'undomcp_list_history') {
+          const limit = args.limit !== undefined ? Number(args.limit) : 10;
+          // Get working directory from the current session for project-scoped query
+          const session = this.dbManager.getSession(this.sessionId);
+          const workingDir = session?.workingDirectory || process.cwd();
+          const list = handleListHistory(this.dbManager, workingDir, limit);
           result = { content: [{ type: 'text', text: JSON.stringify(list, null, 2) }] };
-        } else if (toolName === 'undomcp_preview_undo') {
-          const actionIds = args.actionIds || [];
-          const turnIds = args.turnIds || [];
-          const previews = await handlePreviewUndo(this.dbManager, this.undoController, this.sessionId, actionIds, turnIds);
-          result = { content: [{ type: 'text', text: JSON.stringify(previews, null, 2) }] };
-        } else if (toolName === 'undomcp_undo_selection') {
-          const actionIds = args.actionIds || [];
-          const turnIds = args.turnIds || [];
-          const confirmClassD = !!args.confirmClassD;
-          const overwriteConflicts = !!args.overwriteConflicts;
-
-          const undoResults = await handleUndoSelection(
-            this.dbManager,
-            this.undoController,
-            this.sessionId,
-            actionIds,
-            turnIds,
-            confirmClassD,
-            overwriteConflicts
-          );
-
-          const finalResults: any[] = [];
-          for (const undoResult of undoResults) {
-            if (undoResult.outcome === 'mcp_payload_ready' && undoResult.mcpPayload) {
-              try {
-                const compensationResponse = await this.executeCompensatingCall(
-                  undoResult.mcpPayload.params.name,
-                  undoResult.mcpPayload.params.arguments
-                );
-                
-                const isError = compensationResponse.error !== undefined || (compensationResponse.result && compensationResponse.result.isError === true);
-                if (isError) {
-                  this.dbManager.updateActionState(
-                    undoResult.actionId,
-                    'undo_failed',
-                    new Date().toISOString(),
-                    undefined,
-                    JSON.stringify(compensationResponse.error || compensationResponse.result)
-                  );
-                  finalResults.push({
-                    actionId: undoResult.actionId,
-                    success: false,
-                    outcome: 'error',
-                    error: `Compensating tool call failed: ${JSON.stringify(compensationResponse.error || compensationResponse.result)}`
-                  });
-                } else {
-                  this.dbManager.updateActionState(
-                    undoResult.actionId,
-                    'undone',
-                    new Date().toISOString(),
-                    compensationResponse.result
-                  );
-                  finalResults.push({
-                    actionId: undoResult.actionId,
-                    success: true,
-                    outcome: 'mcp_payload_ready'
-                  });
-                }
-              } catch (err: any) {
-                this.dbManager.updateActionState(
-                  undoResult.actionId,
-                  'undo_failed',
-                  new Date().toISOString(),
-                  undefined,
-                  err.message
-                );
-                finalResults.push({
-                  actionId: undoResult.actionId,
-                  success: false,
-                  outcome: 'error',
-                  error: `Failed to execute compensating call: ${err.message}`
-                });
-              }
-            } else {
-              finalResults.push(undoResult);
-            }
-          }
-
-          result = { content: [{ type: 'text', text: JSON.stringify(finalResults, null, 2) }] };
         } else {
           error = {
             code: -32601,
@@ -665,9 +433,6 @@ export class ProxyEngine {
     };
     this.forwardToAgent(JSON.stringify(response), agentStdout);
   }
-
-
-
 
   private forwardToAgent(line: string, agentStdout: Writable): void {
     if (!agentStdout.destroyed) {

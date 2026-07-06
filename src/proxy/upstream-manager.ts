@@ -95,7 +95,11 @@ export class UpstreamManager {
       const def = inst.definition;
       const combinedEnv = { ...process.env, ...(def.env || {}) } as Record<string, string>;
 
-      const proc = spawn(def.command, def.args, {
+      const isWin = process.platform === 'win32';
+      const cmd = isWin ? (process.env.COMSPEC || 'cmd.exe') : def.command;
+      const args = isWin ? ['/d', '/s', '/c', def.command, ...def.args] : def.args;
+
+      const proc = spawn(cmd, args, {
         env: combinedEnv,
         stdio: ['pipe', 'pipe', 'pipe']
       });

@@ -53,6 +53,10 @@ export class InverseResolver {
         const sameToolRestore = this.resolveSameToolRestore(action);
         if (sameToolRestore)
             return sameToolRestore;
+        // 4. Patch/archive soft-delete (Class B/D)
+        const patchArchive = this.resolvePatchArchive(action);
+        if (patchArchive)
+            return patchArchive;
         return null;
     }
     /**
@@ -102,10 +106,11 @@ export class InverseResolver {
             return null;
         const toolName = action.toolName;
         for (const pair of VERB_PAIRS) {
-            if (!pair.forwardPattern.test(toolName))
+            const regex = new RegExp(`(^|[_-])${pair.forwardPrefix}([_-]|$)`, 'i');
+            if (!regex.test(toolName))
                 continue;
             // Build the candidate inverse tool name
-            const inverseName = toolName.replace(new RegExp(`^${pair.forwardPrefix}`), pair.inversePrefix);
+            const inverseName = toolName.replace(new RegExp(`(^|[_-])${pair.forwardPrefix}([_-]|$)`, 'i'), `$1${pair.inversePrefix}$2`);
             // Check if the inverse tool exists in the schema cache
             const inverseSchema = this.schemaCache.getToolSchema(inverseName);
             if (!inverseSchema)
@@ -225,6 +230,110 @@ export class InverseResolver {
                 return value;
             }
         }
+        // 6. Generic ID fallback
+        if (ID_FIELD_PATTERNS.some(p => p.test(targetParam))) {
+            if ('id' in resultData)
+                return resultData.id;
+            if ('_id' in resultData)
+                return resultData._id;
+            if (idFields.size === 1) {
+                return Array.from(idFields.values())[0];
+            }
+        }
         return undefined;
+    }
+    /**
+     * Generic fallback for creation tools that do not have a direct delete tool.
+     * Looks for a patch/update tool that takes an ID and has a soft-delete boolean parameter.
+     */
+    resolvePatchArchive(action) {
+        if (!action.toolName)
+            return null;
+        const toolName = action.toolName;
+        const forwardRegex = /(?:^|[_-])(create|add|insert|post)(?:[_-]|$)/i;
+        const match = toolName.match(forwardRegex);
+        if (!match)
+            return null;
+        const forwardVerb = match[1].toLowerCase();
+        const delimiters = /[_-]/;
+        const parts = toolName.split(delimiters);
+        const verbIndex = parts.findIndex(p => p.toLowerCase() === forwardVerb);
+        if (verbIndex === -1)
+            return null;
+        const verbList = ['create', 'add', 'insert', 'post', 'get', 'delete', 'remove', 'patch', 'update', 'put', 'api'];
+        const nounParts = parts.filter(p => !verbList.includes(p.toLowerCase()));
+        if (nounParts.length === 0)
+            return null;
+        const allSchemas = this.schemaCache.getAllSchemas();
+        const updateVerbs = ['patch', 'update', 'edit', 'set', 'archive', 'trash'];
+        for (const schema of allSchemas) {
+            const targetName = schema.name;
+            if (targetName === toolName)
+                continue;
+            const targetParts = targetName.split(delimiters).map(p => p.toLowerCase());
+            const hasUpdateVerb = targetParts.some(p => updateVerbs.includes(p));
+            if (!hasUpdateVerb)
+                continue;
+            const hasNounParts = nounParts.every(n => targetParts.includes(n.toLowerCase()));
+            if (!hasNounParts)
+                continue;
+            const properties = schema.inputSchema?.properties || {};
+            const required = schema.inputSchema?.required || [];
+            let idParam = null;
+            for (const propName of Object.keys(properties)) {
+                for (const pattern of ID_FIELD_PATTERNS) {
+                    if (pattern.test(propName)) {
+                        idParam = propName;
+                        break;
+                    }
+                }
+                if (idParam)
+                    break;
+            }
+            if (!idParam)
+                continue;
+            const deleteParams = ['in_trash', 'archived', 'delete', 'deleted', 'trash', 'archive'];
+            let deleteParam = null;
+            for (const propName of Object.keys(properties)) {
+                if (deleteParams.includes(propName.toLowerCase())) {
+                    const propSchema = properties[propName];
+                    if (propSchema && (propSchema.type === 'boolean' || (Array.isArray(propSchema.type) && propSchema.type.includes('boolean')))) {
+                        deleteParam = propName;
+                        break;
+                    }
+                }
+            }
+            if (!deleteParam)
+                continue;
+            const mappedIdValue = this.findValueForParam(idParam, this.extractIdFields(action.resultData || {}), action.resultData || {}, action.parameters || {});
+            if (mappedIdValue === undefined)
+                continue;
+            const inverseParams = {
+                [idParam]: mappedIdValue,
+                [deleteParam]: true
+            };
+            let satisfiedAllRequired = true;
+            for (const req of required) {
+                if (req === idParam || req === deleteParam)
+                    continue;
+                if (action.parameters && req in action.parameters) {
+                    inverseParams[req] = action.parameters[req];
+                }
+                else {
+                    satisfiedAllRequired = false;
+                    break;
+                }
+            }
+            if (!satisfiedAllRequired)
+                continue;
+            return {
+                inverseTool: targetName,
+                inverseParams,
+                source: 'heuristic',
+                confidence: 0.85,
+                reversibilityClass: 'B'
+            };
+        }
+        return null;
     }
 }

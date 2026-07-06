@@ -51,38 +51,13 @@ export interface Action {
   metadata?: Record<string, any>;
 }
 
-export interface Snapshot {
-  id: string;
-  actionId?: string;
-  filePath: string;
-  content?: Buffer;
-  snapshotRole: 'baseline' | 'pre' | 'post';
-  originalSize?: number;
-  compressedSize?: number;
-  sha256: string;
-  createdAt: string;
-}
-
-export interface FileIndexEntry {
-  filePath: string;
-  snapshotId: string;
-  sha256: string;
-  sizeBytes?: number;
-  mtimeMs?: number;
-  updatedAt: string;
-}
-
-export interface Checkpoint {
-  id: string;
-  sessionId: string;
-  name: string;
-  sequenceNum: number;
-  createdAt: string;
-}
-
 export class DatabaseManager {
   private db: Database.Database;
   private dbPath: string;
+  private actionCountSinceLastCheck = 0;
+  private static readonly MAX_DB_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
+  private static readonly TARGET_DB_SIZE_BYTES = 45 * 1024 * 1024; // 45MB headroom
+  private static readonly CHECK_INTERVAL = 50; // check every 50 actions
 
   constructor(customDbPath?: string) {
     if (customDbPath) {
@@ -120,9 +95,18 @@ export class DatabaseManager {
     return this.dbPath;
   }
 
+  public normalizePath(p: string): string {
+    // Resolve to absolute, lowercase, forward slashes, no trailing slash
+    // Works on Windows, macOS, and Linux
+    return path.resolve(p).toLowerCase().replace(/\\/g, '/').replace(/\/+$/, '');
+  }
+
   // --- Session Methods ---
 
   public createSession(session: Session): void {
+    const normalizedWd = session.workingDirectory
+      ? this.normalizePath(session.workingDirectory)
+      : null;
     const query = `
       INSERT INTO sessions (id, started_at, ended_at, working_directory, config_hash, metadata)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -131,7 +115,7 @@ export class DatabaseManager {
       session.id,
       session.startedAt,
       session.endedAt || null,
-      session.workingDirectory || null,
+      normalizedWd,
       session.configHash || null,
       session.metadata ? JSON.stringify(session.metadata) : null
     );
@@ -171,7 +155,6 @@ export class DatabaseManager {
       metadata: row.metadata ? JSON.parse(row.metadata) : undefined
     };
   }
-
 
   // --- Turn Methods ---
 
@@ -237,7 +220,6 @@ export class DatabaseManager {
     }));
   }
 
-
   // --- Action Methods ---
 
   public getLastActionTimestampForSession(sessionId: string): string | null {
@@ -278,6 +260,8 @@ export class DatabaseManager {
     if (action.turnId) {
       this.incrementTurnActionCount(action.turnId);
     }
+
+    this.enforceSizeLimit();
   }
 
   public updateActionResults(
@@ -407,120 +391,86 @@ export class DatabaseManager {
     };
   }
 
-  // --- Snapshot Methods ---
+  // --- Project-Scoped Query Methods ---
 
-  public createSnapshot(snapshot: Snapshot): void {
+  public getRecentActionsForProject(workingDirectory: string, limit: number = 10): Action[] {
+    const normalized = this.normalizePath(workingDirectory);
+    // Use LIKE prefix match and also normalize stored paths at query time
+    // to handle old sessions that stored unnormalized paths or slightly different
+    // directory names (e.g., "Antigravity IDE" vs "Antigravity").
     const query = `
-      INSERT INTO snapshots (
-        id, action_id, file_path, content, snapshot_role,
-        original_size, compressed_size, sha256, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      SELECT a.* FROM actions a
+      INNER JOIN sessions s ON a.session_id = s.id
+      WHERE (LOWER(REPLACE(s.working_directory, '\\', '/')) = ?
+             OR LOWER(REPLACE(s.working_directory, '\\', '/')) LIKE ? || '%')
+        AND a.action_type = 'mcp_call'
+        AND a.state = 'executed'
+      ORDER BY a.timestamp DESC
+      LIMIT ?
     `;
-    this.db.prepare(query).run(
-      snapshot.id,
-      snapshot.actionId || null,
-      snapshot.filePath,
-      snapshot.content || null,
-      snapshot.snapshotRole,
-      snapshot.originalSize || null,
-      snapshot.compressedSize || null,
-      snapshot.sha256,
-      snapshot.createdAt
-    );
+    const rows = this.db.prepare(query).all(normalized, normalized, limit) as any[];
+    // Reverse so result is oldest-first (for correct N-to-1 numbering in skill)
+    return rows.reverse().map(row => this.mapRowToAction(row));
   }
 
-  public getSnapshot(snapshotId: string): Snapshot | null {
-    const row = this.db.prepare('SELECT * FROM snapshots WHERE id = ?').get(snapshotId) as any;
-    if (!row) return null;
-    return {
+  public getSessionsForProject(workingDirectory: string): Session[] {
+    const normalized = this.normalizePath(workingDirectory);
+    const rows = this.db.prepare(
+      'SELECT * FROM sessions WHERE working_directory = ? ORDER BY started_at ASC'
+    ).all(normalized) as any[];
+    return rows.map(row => ({
       id: row.id,
-      actionId: row.action_id || undefined,
-      filePath: row.file_path,
-      content: row.content as Buffer || undefined,
-      snapshotRole: row.snapshot_role as any,
-      originalSize: row.original_size || undefined,
-      compressedSize: row.compressed_size || undefined,
-      sha256: row.sha256,
-      createdAt: row.created_at
-    };
+      startedAt: row.started_at,
+      endedAt: row.ended_at || undefined,
+      workingDirectory: row.working_directory || undefined,
+      configHash: row.config_hash || undefined,
+      metadata: row.metadata ? JSON.parse(row.metadata) : undefined
+    }));
   }
 
-  public updateSnapshotActionId(snapshotId: string, actionId: string): void {
-    const query = `
-      UPDATE snapshots
-      SET action_id = ?
-      WHERE id = ?
-    `;
-    this.db.prepare(query).run(actionId, snapshotId);
-  }
+  // --- Storage Limit Enforcement ---
 
-  // --- File Index Methods ---
+  public enforceSizeLimit(): void {
+    this.actionCountSinceLastCheck++;
+    if (this.actionCountSinceLastCheck < DatabaseManager.CHECK_INTERVAL) return;
+    this.actionCountSinceLastCheck = 0;
 
-  public setFileIndex(entry: FileIndexEntry): void {
-    const query = `
-      INSERT INTO file_index (file_path, snapshot_id, sha256, size_bytes, mtime_ms, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(file_path) DO UPDATE SET
-        snapshot_id = excluded.snapshot_id,
-        sha256 = excluded.sha256,
-        size_bytes = excluded.size_bytes,
-        mtime_ms = excluded.mtime_ms,
-        updated_at = excluded.updated_at
-    `;
-    this.db.prepare(query).run(
-      entry.filePath,
-      entry.snapshotId,
-      entry.sha256,
-      entry.sizeBytes !== undefined ? entry.sizeBytes : null,
-      entry.mtimeMs !== undefined ? entry.mtimeMs : null,
-      entry.updatedAt
-    );
-  }
+    let stats;
+    try {
+      stats = fs.statSync(this.dbPath);
+    } catch {
+      return; // Can't stat, skip check
+    }
+    if (stats.size <= DatabaseManager.MAX_DB_SIZE_BYTES) return;
 
-  public getFileIndex(filePath: string): FileIndexEntry | null {
-    const row = this.db.prepare('SELECT * FROM file_index WHERE file_path = ?').get(filePath) as any;
-    if (!row) return null;
-    return {
-      filePath: row.file_path,
-      snapshotId: row.snapshot_id,
-      sha256: row.sha256,
-      sizeBytes: row.size_bytes || undefined,
-      mtimeMs: row.mtime_ms || undefined,
-      updatedAt: row.updated_at
-    };
-  }
+    // Delete oldest sessions (cascades to turns + actions via ON DELETE CASCADE)
+    while (true) {
+      const oldest = this.db.prepare(
+        'SELECT id FROM sessions ORDER BY started_at ASC LIMIT 1'
+      ).get() as any;
+      if (!oldest) break;
 
-  public deleteFileIndex(filePath: string): void {
-    const query = 'DELETE FROM file_index WHERE file_path = ?';
-    this.db.prepare(query).run(filePath);
-  }
+      this.db.prepare('DELETE FROM sessions WHERE id = ?').run(oldest.id);
 
-  // --- Checkpoint Methods ---
+      // Checkpoint WAL and re-check size
+      try {
+        this.db.pragma('wal_checkpoint(TRUNCATE)');
+      } catch {
+        // Ignore checkpoint errors
+      }
+      try {
+        const newStats = fs.statSync(this.dbPath);
+        if (newStats.size <= DatabaseManager.TARGET_DB_SIZE_BYTES) break;
+      } catch {
+        break;
+      }
+    }
 
-  public createCheckpoint(checkpoint: Checkpoint): void {
-    const query = `
-      INSERT INTO checkpoints (id, session_id, name, sequence_num, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `;
-    this.db.prepare(query).run(
-      checkpoint.id,
-      checkpoint.sessionId,
-      checkpoint.name,
-      checkpoint.sequenceNum,
-      checkpoint.createdAt
-    );
-  }
-
-  public getCheckpoint(sessionId: string, name: string): Checkpoint | null {
-    const query = 'SELECT * FROM checkpoints WHERE session_id = ? AND name = ?';
-    const row = this.db.prepare(query).get(sessionId, name) as any;
-    if (!row) return null;
-    return {
-      id: row.id,
-      sessionId: row.session_id,
-      name: row.name,
-      sequenceNum: row.sequence_num,
-      createdAt: row.created_at
-    };
+    // Reclaim space
+    try {
+      this.db.exec('VACUUM');
+    } catch {
+      // Ignore vacuum errors
+    }
   }
 }

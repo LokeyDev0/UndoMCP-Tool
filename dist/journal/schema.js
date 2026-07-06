@@ -50,54 +50,17 @@ export const CREATE_ACTIONS_TABLE = `
     UNIQUE(session_id, sequence_num)
   );
 `;
-export const CREATE_SNAPSHOTS_TABLE = `
-  CREATE TABLE IF NOT EXISTS snapshots (
-    id TEXT PRIMARY KEY,
-    action_id TEXT REFERENCES actions(id) ON DELETE SET NULL,
-    file_path TEXT NOT NULL,
-    content BLOB,  -- raw or compressed binary data
-    snapshot_role TEXT NOT NULL,  -- 'baseline', 'pre', 'post'
-    original_size INTEGER,
-    compressed_size INTEGER,
-    sha256 TEXT NOT NULL,
-    created_at TEXT NOT NULL
-  );
-`;
-export const CREATE_FILE_INDEX_TABLE = `
-  CREATE TABLE IF NOT EXISTS file_index (
-    file_path TEXT PRIMARY KEY,
-    snapshot_id TEXT NOT NULL REFERENCES snapshots(id),
-    sha256 TEXT NOT NULL,
-    size_bytes INTEGER,
-    mtime_ms INTEGER,
-    updated_at TEXT NOT NULL
-  );
-`;
-export const CREATE_CHECKPOINTS_TABLE = `
-  CREATE TABLE IF NOT EXISTS checkpoints (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    name TEXT NOT NULL,
-    sequence_num INTEGER NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE(session_id, name)
-  );
-`;
 export const CREATE_INDEXES = [
     'CREATE INDEX IF NOT EXISTS idx_actions_session ON actions(session_id, sequence_num);',
     'CREATE INDEX IF NOT EXISTS idx_actions_timestamp ON actions(timestamp);',
     'CREATE INDEX IF NOT EXISTS idx_actions_state ON actions(state);',
     'CREATE INDEX IF NOT EXISTS idx_actions_turn ON actions(turn_id);',
-    'CREATE INDEX IF NOT EXISTS idx_snapshots_action ON snapshots(action_id);',
-    'CREATE INDEX IF NOT EXISTS idx_snapshots_hash ON snapshots(sha256);',
-    'CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, turn_num);'
+    'CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, turn_num);',
+    'CREATE INDEX IF NOT EXISTS idx_sessions_working_dir ON sessions(working_directory);'
 ];
 export const MIGRATIONS = [
     CREATE_SESSIONS_TABLE,
     CREATE_TURNS_TABLE,
     CREATE_ACTIONS_TABLE,
-    CREATE_SNAPSHOTS_TABLE,
-    CREATE_FILE_INDEX_TABLE,
-    CREATE_CHECKPOINTS_TABLE,
     ...CREATE_INDEXES
 ];

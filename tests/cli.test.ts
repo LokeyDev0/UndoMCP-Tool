@@ -40,12 +40,12 @@ describe('CLI Entrypoint (index.ts)', () => {
     }
   });
 
-  it('should print "No active session found" when database does not exist or has no active session', () => {
+  it('should print "No MCP actions found" when database has no actions for this project', () => {
     const stdout = execSync('node dist/index.js', { encoding: 'utf8' });
-    expect(stdout).toContain('No active session found.');
+    expect(stdout).toContain('No MCP actions found for this project.');
   });
 
-  it('should print session summary when an active session is found', () => {
+  it('should print project actions when MCP actions exist for the current project', () => {
     // Create an active session and turn in the database
     const dbDir = path.join(tempDir, '.undomcp');
     fs.mkdirSync(dbDir, { recursive: true });
@@ -82,8 +82,8 @@ describe('CLI Entrypoint (index.ts)', () => {
     dbManager.close();
 
     const stdout = execSync('node dist/index.js', { encoding: 'utf8' });
-    expect(stdout).toContain('Active session found: cli_session_1');
-    expect(stdout).toContain('**Turn #1**: "Create a test file"');
-    expect(stdout).toContain('- [ ] Modify file: test.txt');
+    expect(stdout).toContain('Project:');
+    expect(stdout).toContain('Recent MCP Actions:');
+    expect(stdout).toContain('write_file');
   });
 });

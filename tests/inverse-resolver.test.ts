@@ -326,4 +326,78 @@ describe('InverseResolver', () => {
       expect(results[2]!.inverseParams.id).toBe('id_1');
     });
   });
+
+  describe('Prefix-aware and soft-delete fallbacks', () => {
+    it('should resolve prefixed tools like API-create_item to API-delete_item', () => {
+      schemaCache.updateFromToolsList({
+        tools: [
+          {
+            name: 'API-create_item',
+            description: '',
+            inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+          },
+          {
+            name: 'API-delete_item',
+            description: '',
+            inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+          },
+        ],
+      });
+
+      const action = makeAction({
+        toolName: 'API-create_item',
+        parameters: { name: 'Prefixed' },
+        resultData: { id: 'abc123' },
+      });
+
+      const result = resolver.resolve(action);
+      expect(result).toBeTruthy();
+      expect(result!.inverseTool).toBe('API-delete_item');
+    });
+
+    it('should resolve API-post-page to API-patch-page with page_id and in_trash true', () => {
+      schemaCache.updateFromToolsList({
+        tools: [
+          {
+            name: 'API-post-page',
+            description: 'Create a page',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                parent: { type: 'object' },
+                properties: { type: 'object' }
+              },
+              required: ['parent', 'properties']
+            }
+          },
+          {
+            name: 'API-patch-page',
+            description: 'Update page properties or archive',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                page_id: { type: 'string' },
+                in_trash: { type: 'boolean' },
+                archived: { type: 'boolean' }
+              },
+              required: ['page_id']
+            }
+          }
+        ]
+      });
+
+      const action = makeAction({
+        toolName: 'API-post-page',
+        parameters: { parent: { type: 'workspace' }, properties: {} },
+        resultData: { id: 'page_123', object: 'page' }
+      });
+
+      const result = resolver.resolve(action);
+      expect(result).toBeTruthy();
+      expect(result!.inverseTool).toBe('API-patch-page');
+      expect(result!.inverseParams.page_id).toBe('page_123');
+      expect(result!.inverseParams.in_trash).toBe(true);
+      expect(result!.reversibilityClass).toBe('B');
+    });
+  });
 });

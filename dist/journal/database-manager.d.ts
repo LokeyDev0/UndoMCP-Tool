@@ -42,39 +42,18 @@ export interface Action {
     undoError?: string;
     metadata?: Record<string, any>;
 }
-export interface Snapshot {
-    id: string;
-    actionId?: string;
-    filePath: string;
-    content?: Buffer;
-    snapshotRole: 'baseline' | 'pre' | 'post';
-    originalSize?: number;
-    compressedSize?: number;
-    sha256: string;
-    createdAt: string;
-}
-export interface FileIndexEntry {
-    filePath: string;
-    snapshotId: string;
-    sha256: string;
-    sizeBytes?: number;
-    mtimeMs?: number;
-    updatedAt: string;
-}
-export interface Checkpoint {
-    id: string;
-    sessionId: string;
-    name: string;
-    sequenceNum: number;
-    createdAt: string;
-}
 export declare class DatabaseManager {
     private db;
     private dbPath;
+    private actionCountSinceLastCheck;
+    private static readonly MAX_DB_SIZE_BYTES;
+    private static readonly TARGET_DB_SIZE_BYTES;
+    private static readonly CHECK_INTERVAL;
     constructor(customDbPath?: string);
     private init;
     close(): void;
     getPath(): string;
+    normalizePath(p: string): string;
     createSession(session: Session): void;
     endSession(sessionId: string, endedAt: string): void;
     getSession(sessionId: string): Session | null;
@@ -95,12 +74,7 @@ export declare class DatabaseManager {
     getActionsForSession(sessionId: string): Action[];
     getActionsForTurn(turnId: string): Action[];
     private mapRowToAction;
-    createSnapshot(snapshot: Snapshot): void;
-    getSnapshot(snapshotId: string): Snapshot | null;
-    updateSnapshotActionId(snapshotId: string, actionId: string): void;
-    setFileIndex(entry: FileIndexEntry): void;
-    getFileIndex(filePath: string): FileIndexEntry | null;
-    deleteFileIndex(filePath: string): void;
-    createCheckpoint(checkpoint: Checkpoint): void;
-    getCheckpoint(sessionId: string, name: string): Checkpoint | null;
+    getRecentActionsForProject(workingDirectory: string, limit?: number): Action[];
+    getSessionsForProject(workingDirectory: string): Session[];
+    enforceSizeLimit(): void;
 }
