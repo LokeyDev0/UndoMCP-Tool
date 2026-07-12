@@ -16,8 +16,6 @@
 
 ## The Problem
 
-## The Problem
-
 > AI agents execute powerful actions through MCP—editing Notion pages, creating Stripe customers, modifying AWS configurations, or writing database schemas. But when an agent makes a critial mistake like , **there is no Ctrl+Z.**
 
 Currently, you only have two flawed options:
