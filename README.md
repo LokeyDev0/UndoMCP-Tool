@@ -110,9 +110,6 @@ Works with **any MCP server** — no server-side changes needed.
 After setup, invoke UndoMCP by telling your agent:
 
 - `/undomcp`
-- "undo"
-- "revert"
-- "rollback"
 
 The agent will call `undomcp_list_history`, filter to only state-changing actions, and present:
 
