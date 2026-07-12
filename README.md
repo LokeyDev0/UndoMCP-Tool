@@ -16,13 +16,23 @@
 
 ## The Problem
 
-AI agents make changes through MCP — editing Notion pages, creating Stripe customers, modifying AWS configs, writing files. When something goes wrong, there's no undo. You're left manually tracking down what changed.
+## The Problem
+
+> AI agents execute powerful actions through MCP—editing Notion pages, creating Stripe customers, modifying AWS configurations, or writing database schemas. But when an agent makes a critial mistake like , **there is no Ctrl+Z.**
+
+Currently, you only have two flawed options:
+
+* **Manually undo the change:** This is incredibly time-consuming. Worse, if you rely entirely on AI, you might not even know *how* to manually fix a broken AWS config or a corrupted Supabase database.
+
+* **Ask the agent to undo it inside of the session:** LLMs have finite context windows. If you need to revert an action from 10 prompts ago—or from a previous session—the agent will likely lack the clarity, memory, or context to safely roll it back.
 
 ## What UndoMCP Does
 
-UndoMCP records every MCP tool call your agent makes. When you invoke `/undomcp` (or say "undo", "revert", "rollback"), your agent shows you what changed and lets you selectively reverse it.
+UndoMCP records every MCP tool call your agent makes inside of a small database. When you invoke `/undomcp` , your agent invokes a skill witch looks into the database and shows you what changed and lets you selectively reverse it.
 
-Install once. Works automatically. Persists across sessions.
+This means the you are not limted by the context window of LLM and you can undo MCP changes across sessions. 
+
+UndoMcp is a install and forget tool. Works automatically. Persists across sessions.
 
 ---
 
