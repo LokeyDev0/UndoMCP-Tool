@@ -190,7 +190,7 @@ describe('UndoController', () => {
   });
 
   describe('execute', () => {
-    it('should prepare MCP payload for a Class B action and mark it undone', async () => {
+    it('should mark an MCP action as undone (no payload generation)', async () => {
       const action = createTestAction({
         toolName: 'create_item',
         parameters: { name: 'Widget' },
@@ -201,11 +201,7 @@ describe('UndoController', () => {
 
       expect(results.length).toBe(1);
       expect(results[0].success).toBe(true);
-      expect(results[0].outcome).toBe('mcp_payload_ready');
-      expect(results[0].mcpPayload).toBeTruthy();
-      expect(results[0].mcpPayload!.method).toBe('tools/call');
-      expect(results[0].mcpPayload!.params.name).toBe('delete_item');
-      expect(results[0].mcpPayload!.params.arguments.id).toBe('item_99');
+      expect(results[0].outcome).toBe('marked_undone');
 
       // Verify DB state updated
       const updatedAction = dbManager.getAction(action.id);
@@ -227,7 +223,7 @@ describe('UndoController', () => {
       expect(results[0].outcome).toBe('skipped');
     });
 
-    it('should return error for unresolvable actions', async () => {
+    it('should mark unresolvable MCP actions as undone too', async () => {
       const action = createTestAction({
         toolName: 'transform_data',
         parameters: { input: 'test' },
@@ -236,9 +232,8 @@ describe('UndoController', () => {
       const results = await controller.execute([action.id]);
 
       expect(results.length).toBe(1);
-      expect(results[0].success).toBe(false);
-      expect(results[0].outcome).toBe('error');
-      expect(results[0].error).toContain('No inverse resolution found');
+      expect(results[0].success).toBe(true);
+      expect(results[0].outcome).toBe('marked_undone');
     });
 
     it('should execute actions in reverse sequence order', async () => {
@@ -259,9 +254,11 @@ describe('UndoController', () => {
       const results = await controller.execute([action1.id, action2.id]);
 
       expect(results.length).toBe(2);
-      // First result should be the last action (seq 2)
-      expect(results[0].mcpPayload!.params.arguments.id).toBe('id_2');
-      expect(results[1].mcpPayload!.params.arguments.id).toBe('id_1');
+      // Both should be marked undone, in reverse sequence order
+      expect(results[0].actionId).toBe(action2.id);
+      expect(results[0].outcome).toBe('marked_undone');
+      expect(results[1].actionId).toBe(action1.id);
+      expect(results[1].outcome).toBe('marked_undone');
     });
   });
 

@@ -46,6 +46,12 @@ export class SchemaCache {
         return this.schemas.size;
     }
     /**
+     * Removes all cached schemas.
+     */
+    clear() {
+        this.schemas.clear();
+    }
+    /**
      * Searches for tools whose names match the given regex pattern.
      */
     findToolsByPattern(pattern) {

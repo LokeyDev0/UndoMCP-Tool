@@ -1,3 +1,7 @@
+/**
+ * Conflict Detector — Verifies file integrity and prompts for conflict resolution
+ * when files have been modified externally between logging and undo.
+ */
 import * as readline from 'readline';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -24,6 +28,8 @@ export function verifyFileHash(filePath, expectedHash) {
  * Prompts the user to resolve a file conflict.
  * Option 1: Exit (abort rollback)
  * Option 2: Overwrite everything (revert to baseline snapshot)
+ *
+ * In non-interactive environments, defaults to 'exit' to prevent hangs.
  */
 export async function resolveConflictPrompt(filePath, messageDetail) {
     return new Promise((resolve) => {
@@ -64,7 +70,7 @@ export async function resolveConflictPrompt(filePath, messageDetail) {
         const rl = readline.createInterface({
             input,
             output,
-            terminal: true
+            terminal: true,
         });
         const msg = `
 [undomcp] EXTERNAL CHANGES DETECTED:
@@ -87,7 +93,7 @@ Select option (1 or 2): `;
                     // Ignore close error
                 }
             }
-            if (trimmed === '2' || trimmed.toLowerCase() === 'overwrite' || trimmed.toLowerCase() === '2') {
+            if (trimmed === '2' || trimmed.toLowerCase() === 'overwrite') {
                 resolve('overwrite');
             }
             else {

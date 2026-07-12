@@ -9,8 +9,11 @@ export declare class SnapshotStore {
     /**
      * Compresses the file content using deflate and saves it in the database.
      * Returns the generated snapshot ID.
+     *
+     * Files larger than MAX_SNAPSHOT_SIZE (10 MB) are skipped to avoid
+     * blocking the proxy and inflating the database.
      */
-    createSnapshot(actionId: string | undefined, filePath: string, content: Buffer, role: 'baseline' | 'pre' | 'post'): string;
+    createSnapshot(actionId: string | undefined, filePath: string, content: Buffer, role: 'pre' | 'post' | 'baseline'): string;
     /**
      * Retrieves and decompresses the snapshot content from the database.
      */

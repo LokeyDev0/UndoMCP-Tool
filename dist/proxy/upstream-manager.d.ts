@@ -43,7 +43,7 @@ export declare class UpstreamManager {
     /**
      * Send a JSON-RPC request to a specific upstream by namespace.
      */
-    callUpstreamDirect(namespace: string, method: string, params: any, customId?: string | number): Promise<any>;
+    callUpstreamDirect(namespace: string, method: string, params: any, customId?: string | number, timeoutMs?: number): Promise<any>;
     /**
      * Routes a Namespaced tool call to the correct upstream process.
      */

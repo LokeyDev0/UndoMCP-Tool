@@ -7,9 +7,15 @@
   "bin": {
     "undomcp": "./dist/index.js"
   },
+  "files": [
+    "dist/",
+    "install.sh",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "build:bin": "node build.js",
+    "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
     "start": "node dist/index.js"

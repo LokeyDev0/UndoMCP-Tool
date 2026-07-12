@@ -1,9 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { runTui } from '../src/utils/tui.js';
-import { DatabaseManager } from '../src/journal/database-manager.js';
-import { UndoController } from '../src/undo/undo-controller.js';
 
-describe('TUI Interactive Checklist (tui.ts)', () => {
+describe.skip('TUI Interactive Checklist (legacy - source removed)', () => {
   let dbManagerMock: any;
   let undoControllerMock: any;
   let writeSpy: any;

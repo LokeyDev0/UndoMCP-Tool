@@ -247,6 +247,36 @@ export class DatabaseManager {
             metadata: row.metadata ? JSON.parse(row.metadata) : undefined
         };
     }
+    // --- Snapshot Methods ---
+    createSnapshot(snapshot) {
+        const query = `
+      INSERT INTO snapshots (id, action_id, file_path, snapshot_role, content, original_size, compressed_size, sha256, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+        this.db.prepare(query).run(snapshot.id, snapshot.actionId || null, snapshot.filePath, snapshot.snapshotRole, snapshot.content, snapshot.originalSize, snapshot.compressedSize, snapshot.sha256, snapshot.createdAt);
+    }
+    getSnapshot(snapshotId) {
+        const row = this.db.prepare('SELECT * FROM snapshots WHERE id = ?').get(snapshotId);
+        if (!row)
+            return null;
+        return {
+            id: row.id,
+            actionId: row.action_id || undefined,
+            filePath: row.file_path,
+            snapshotRole: row.snapshot_role,
+            content: row.content,
+            originalSize: row.original_size,
+            compressedSize: row.compressed_size,
+            sha256: row.sha256,
+            createdAt: row.created_at
+        };
+    }
+    updateSnapshotActionId(snapshotId, actionId) {
+        this.db.prepare('UPDATE snapshots SET action_id = ? WHERE id = ?').run(actionId, snapshotId);
+    }
+    deleteSnapshot(snapshotId) {
+        this.db.prepare('DELETE FROM snapshots WHERE id = ?').run(snapshotId);
+    }
     // --- Project-Scoped Query Methods ---
     getRecentActionsForProject(workingDirectory, limit = 10) {
         const normalized = this.normalizePath(workingDirectory);
@@ -260,7 +290,7 @@ export class DatabaseManager {
              OR LOWER(REPLACE(s.working_directory, '\\', '/')) LIKE ? || '%')
         AND a.action_type = 'mcp_call'
         AND a.state = 'executed'
-      ORDER BY a.timestamp DESC
+      ORDER BY a.timestamp DESC, a.sequence_num DESC
       LIMIT ?
     `;
         const rows = this.db.prepare(query).all(normalized, normalized, limit);

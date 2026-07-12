@@ -192,15 +192,26 @@ export class UpstreamManager {
   /**
    * Send a JSON-RPC request to a specific upstream by namespace.
    */
-  public async callUpstreamDirect(namespace: string, method: string, params: any, customId?: string | number): Promise<any> {
+  public async callUpstreamDirect(namespace: string, method: string, params: any, customId?: string | number, timeoutMs?: number): Promise<any> {
     const inst = this.upstreams.get(namespace);
     if (!inst || !inst.process) {
       throw new Error(`Upstream namespace "${namespace}" is not running or defined.`);
     }
 
+    const effectiveTimeout = timeoutMs ?? 60000; // Default 60s timeout
+
     return new Promise((resolve, reject) => {
       const id = customId !== undefined ? customId : `up_${nanoid()}`;
-      inst.pendingRequests.set(id, (res) => resolve(res));
+
+      const timer = setTimeout(() => {
+        inst.pendingRequests.delete(id);
+        reject(new Error(`Upstream [${namespace}] timed out after ${effectiveTimeout}ms for method "${method}"`));
+      }, effectiveTimeout);
+
+      inst.pendingRequests.set(id, (res) => {
+        clearTimeout(timer);
+        resolve(res);
+      });
 
       const request = {
         jsonrpc: '2.0',
@@ -212,6 +223,7 @@ export class UpstreamManager {
       if (inst.process.stdin && !inst.process.stdin.destroyed) {
         inst.process.stdin.write(JSON.stringify(request) + '\n');
       } else {
+        clearTimeout(timer);
         inst.pendingRequests.delete(id);
         reject(new Error(`Upstream process [${namespace}] stdin is closed.`));
       }

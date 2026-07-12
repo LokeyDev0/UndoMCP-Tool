@@ -1,13 +1,11 @@
 /**
- * UndoController — Orchestrates the full undo pipeline:
- *   1. Resolve inverses (heuristic → LLM fallback)
- *   2. Check for file conflicts
- *   3. Execute file restores
- *   4. Prepare MCP compensating call payloads
+ * UndoController — Orchestrates the undo pipeline:
+ *   1. File actions (Class A): Restore from snapshot with conflict detection
+ *   2. MCP actions: Mark as undone in the journal (AI agent handles inverse calls)
  *
- * MCP compensating calls are NOT dispatched here. The controller returns
- * the prepared payload for the caller (undo tool or TUI) to forward
- * through the proxy. This will be wired up in Phase 5 (Step 12).
+ * MCP inverse calls are NOT handled here. The AI agent reasons about and
+ * executes inverse MCP calls directly, then uses this controller (via the
+ * undomcp_undo_action tool) to mark actions as undone.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -65,8 +63,8 @@ export class UndoController {
      * Executes the undo pipeline for the given action IDs.
      *
      * - File actions (Class A): Restores file from snapshot, with conflict detection.
-     * - MCP actions (Class B/C): Returns the compensating payload (caller dispatches).
-     * - LLM suggestions (Class D): Returns requires_confirmation, never auto-executes.
+     * - MCP actions: Simply marks them as undone in the journal.
+     *   The AI agent handles inverse MCP calls directly.
      *
      * @param conflictResolver Optional callback to resolve file conflicts.
      *   If not provided, conflicts cause the action to be skipped.
@@ -85,60 +83,26 @@ export class UndoController {
                 continue;
             }
             try {
-                let resolution = this.inverseResolver.resolve(action);
-                // Fall back to LLM solver
-                if (!resolution && this.llmSolver) {
-                    resolution = await this.llmSolver.solve(action, this.schemaCache);
+                // File actions: resolve and restore from snapshot
+                if (action.actionType === 'file_change') {
+                    const resolution = this.inverseResolver.resolve(action);
+                    if (resolution && resolution.reversibilityClass === 'A' && resolution.inverseTool === '__file_restore__') {
+                        const result = await this.executeFileAction(action, resolution, conflictResolver);
+                        results.push(result);
+                        continue;
+                    }
+                    if (resolution && resolution.reversibilityClass === 'A' && resolution.inverseTool === '__file_delete__') {
+                        const result = await this.executeFileDeleteAction(action, resolution, conflictResolver);
+                        results.push(result);
+                        continue;
+                    }
                 }
-                if (!resolution) {
-                    results.push({
-                        actionId: action.id,
-                        success: false,
-                        outcome: 'error',
-                        error: 'No inverse resolution found for this action.',
-                    });
-                    continue;
-                }
-                // Class D: suggestion only, never auto-execute
-                if (resolution.reversibilityClass === 'D') {
-                    results.push({
-                        actionId: action.id,
-                        success: true,
-                        outcome: 'requires_confirmation',
-                        mcpPayload: {
-                            method: 'tools/call',
-                            params: {
-                                name: resolution.inverseTool,
-                                arguments: resolution.inverseParams,
-                            },
-                        },
-                    });
-                    continue;
-                }
-                // Class A: file restore
-                if (resolution.reversibilityClass === 'A' && resolution.inverseTool === '__file_restore__') {
-                    const result = await this.executeFileAction(action, resolution, conflictResolver);
-                    results.push(result);
-                    continue;
-                }
-                if (resolution.reversibilityClass === 'A' && resolution.inverseTool === '__file_delete__') {
-                    const result = await this.executeFileDeleteAction(action, resolution, conflictResolver);
-                    results.push(result);
-                    continue;
-                }
-                // Class B/C: MCP compensating call
-                this.dbManager.updateActionState(action.id, 'undone', new Date().toISOString(), { inverseTool: resolution.inverseTool, inverseParams: resolution.inverseParams });
+                // MCP actions (and file actions without resolution): just mark as undone
+                this.dbManager.updateActionState(action.id, 'undone', new Date().toISOString());
                 results.push({
                     actionId: action.id,
                     success: true,
-                    outcome: 'mcp_payload_ready',
-                    mcpPayload: {
-                        method: 'tools/call',
-                        params: {
-                            name: resolution.inverseTool,
-                            arguments: resolution.inverseParams,
-                        },
-                    },
+                    outcome: 'marked_undone',
                 });
             }
             catch (err) {
@@ -235,7 +199,6 @@ export class UndoController {
                 actionId: action.id,
                 success: true,
                 outcome: 'file_restored',
-                conflictOverwritten: action.postHash ? !verifyFileHash(filePath, action.postHash) : undefined,
             };
         }
         this.dbManager.updateActionState(action.id, 'undo_failed', new Date().toISOString(), undefined, `Failed to restore file from snapshot ${snapshotId}`);
@@ -295,7 +258,6 @@ export class UndoController {
                 actionId: action.id,
                 success: true,
                 outcome: 'file_restored',
-                conflictOverwritten: action.postHash ? !verifyFileHash(absolutePath, action.postHash) : undefined,
             };
         }
         catch (err) {

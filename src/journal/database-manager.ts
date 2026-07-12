@@ -51,6 +51,18 @@ export interface Action {
   metadata?: Record<string, any>;
 }
 
+export interface Snapshot {
+  id: string;
+  actionId?: string;
+  filePath: string;
+  snapshotRole: 'pre' | 'post' | 'baseline';
+  content: Buffer;
+  originalSize: number;
+  compressedSize: number;
+  sha256: string;
+  createdAt: string;
+}
+
 export class DatabaseManager {
   private db: Database.Database;
   private dbPath: string;
@@ -391,6 +403,50 @@ export class DatabaseManager {
     };
   }
 
+  // --- Snapshot Methods ---
+
+  public createSnapshot(snapshot: Snapshot): void {
+    const query = `
+      INSERT INTO snapshots (id, action_id, file_path, snapshot_role, content, original_size, compressed_size, sha256, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+    this.db.prepare(query).run(
+      snapshot.id,
+      snapshot.actionId || null,
+      snapshot.filePath,
+      snapshot.snapshotRole,
+      snapshot.content,
+      snapshot.originalSize,
+      snapshot.compressedSize,
+      snapshot.sha256,
+      snapshot.createdAt
+    );
+  }
+
+  public getSnapshot(snapshotId: string): Snapshot | null {
+    const row = this.db.prepare('SELECT * FROM snapshots WHERE id = ?').get(snapshotId) as any;
+    if (!row) return null;
+    return {
+      id: row.id,
+      actionId: row.action_id || undefined,
+      filePath: row.file_path,
+      snapshotRole: row.snapshot_role,
+      content: row.content,
+      originalSize: row.original_size,
+      compressedSize: row.compressed_size,
+      sha256: row.sha256,
+      createdAt: row.created_at
+    };
+  }
+
+  public updateSnapshotActionId(snapshotId: string, actionId: string): void {
+    this.db.prepare('UPDATE snapshots SET action_id = ? WHERE id = ?').run(actionId, snapshotId);
+  }
+
+  public deleteSnapshot(snapshotId: string): void {
+    this.db.prepare('DELETE FROM snapshots WHERE id = ?').run(snapshotId);
+  }
+
   // --- Project-Scoped Query Methods ---
 
   public getRecentActionsForProject(workingDirectory: string, limit: number = 10): Action[] {
@@ -405,7 +461,7 @@ export class DatabaseManager {
              OR LOWER(REPLACE(s.working_directory, '\\', '/')) LIKE ? || '%')
         AND a.action_type = 'mcp_call'
         AND a.state = 'executed'
-      ORDER BY a.timestamp DESC
+      ORDER BY a.timestamp DESC, a.sequence_num DESC
       LIMIT ?
     `;
     const rows = this.db.prepare(query).all(normalized, normalized, limit) as any[];

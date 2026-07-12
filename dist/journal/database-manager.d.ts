@@ -42,6 +42,17 @@ export interface Action {
     undoError?: string;
     metadata?: Record<string, any>;
 }
+export interface Snapshot {
+    id: string;
+    actionId?: string;
+    filePath: string;
+    snapshotRole: 'pre' | 'post' | 'baseline';
+    content: Buffer;
+    originalSize: number;
+    compressedSize: number;
+    sha256: string;
+    createdAt: string;
+}
 export declare class DatabaseManager {
     private db;
     private dbPath;
@@ -74,6 +85,10 @@ export declare class DatabaseManager {
     getActionsForSession(sessionId: string): Action[];
     getActionsForTurn(turnId: string): Action[];
     private mapRowToAction;
+    createSnapshot(snapshot: Snapshot): void;
+    getSnapshot(snapshotId: string): Snapshot | null;
+    updateSnapshotActionId(snapshotId: string, actionId: string): void;
+    deleteSnapshot(snapshotId: string): void;
     getRecentActionsForProject(workingDirectory: string, limit?: number): Action[];
     getSessionsForProject(workingDirectory: string): Session[];
     enforceSizeLimit(): void;

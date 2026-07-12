@@ -7,7 +7,11 @@
 export interface ToolSchema {
     name: string;
     description: string;
-    inputSchema: Record<string, any>;
+    inputSchema: {
+        type?: string;
+        properties?: Record<string, any>;
+        required?: string[];
+    };
 }
 export declare class SchemaCache {
     private schemas;
@@ -17,7 +21,9 @@ export declare class SchemaCache {
      *
      * Calling this again replaces all previously cached schemas.
      */
-    updateFromToolsList(toolsListResult: any): void;
+    updateFromToolsList(toolsListResult: {
+        tools: any[];
+    }): void;
     /**
      * Returns the schema for a tool by exact name, or null if not cached.
      */
@@ -30,6 +36,10 @@ export declare class SchemaCache {
      * Returns the number of cached schemas.
      */
     size(): number;
+    /**
+     * Removes all cached schemas.
+     */
+    clear(): void;
     /**
      * Searches for tools whose names match the given regex pattern.
      */

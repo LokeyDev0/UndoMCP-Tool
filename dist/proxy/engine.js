@@ -1,7 +1,21 @@
 import * as readline from 'readline';
+import * as fs from 'fs';
+import * as path from 'path';
 import { nanoid } from 'nanoid';
 import { UpstreamManager } from './upstream-manager.js';
 import { UNDO_TOOLS, handleListHistory } from '../tools/undo-tools.js';
+import { SchemaCache } from '../undo/schema-cache.js';
+import { InverseResolver } from '../undo/inverse-resolver.js';
+import { LlmSolver } from '../undo/llm-solver.js';
+import { SnapshotStore, computeSha256 } from '../file-safety/snapshot-store.js';
+import { UndoController } from '../undo/undo-controller.js';
+/** Regex patterns for tools that modify local files */
+const FILE_TOOL_PATTERNS = [
+    /write[_-]?file/i, /create[_-]?file/i, /edit[_-]?file/i,
+    /replace[_-]?file/i, /delete[_-]?file/i, /move[_-]?file/i,
+    /rename[_-]?file/i, /write[_-]?to[_-]?file/i, /overwrite/i,
+    /append[_-]?file/i, /patch/i
+];
 export class ProxyEngine {
     command;
     args;
@@ -18,6 +32,12 @@ export class ProxyEngine {
     upstreamManager;
     activeRequests = new Map();
     agentReader;
+    // Phase 3/5/6: Undo system components
+    schemaCache;
+    inverseResolver;
+    snapshotStore;
+    undoController;
+    llmSolver;
     constructor(options) {
         this.command = options.command;
         this.args = options.args;
@@ -46,6 +66,18 @@ export class ProxyEngine {
             command: this.command,
             args: this.args
         });
+        // Initialize undo system components
+        this.schemaCache = new SchemaCache();
+        this.inverseResolver = new InverseResolver(this.schemaCache);
+        this.llmSolver = LlmSolver.fromEnv() ?? undefined;
+        if (this.dbManager) {
+            this.snapshotStore = new SnapshotStore(this.dbManager);
+            this.undoController = new UndoController(this.dbManager, this.snapshotStore, this.schemaCache, this.inverseResolver, this.llmSolver);
+        }
+    }
+    /** Exposes the schema cache for testing and external consumers. */
+    getSchemaCache() {
+        return this.schemaCache;
     }
     /**
      * Starts the proxy engine by spawning the upstream processes and connecting streams.
@@ -155,7 +187,23 @@ export class ProxyEngine {
                     }
                 }
                 try {
-                    const allTools = await this.upstreamManager.listAllTools();
+                    // Retry up to 3 times with 2s delay if upstream isn't ready yet
+                    let allTools = [];
+                    let attempts = 0;
+                    while (attempts < 3) {
+                        try {
+                            allTools = await this.upstreamManager.listAllTools();
+                            break;
+                        }
+                        catch (err) {
+                            attempts++;
+                            if (attempts >= 3)
+                                throw err;
+                            await new Promise(resolve => setTimeout(resolve, 2000));
+                        }
+                    }
+                    // Phase 3: Cache tool schemas for InverseResolver
+                    this.schemaCache.updateFromToolsList({ tools: allTools });
                     const aggregatedTools = [...allTools, ...UNDO_TOOLS];
                     const response = {
                         jsonrpc: '2.0',
@@ -249,6 +297,28 @@ export class ProxyEngine {
                         console.error(`[undomcp] Database error in pre-action logging: ${err.message}`);
                     }
                 }
+                // Phase 6: Capture pre-snapshot for file-modifying tools
+                const args = parsed.params?.arguments || {};
+                const isFileModifying = FILE_TOOL_PATTERNS.some(p => p.test(baseToolName));
+                const filePath = args.path || args.filePath || args.file || args.TargetFile || args.filename;
+                let preHash;
+                if (isFileModifying && filePath && this.snapshotStore && actionId) {
+                    try {
+                        const absolutePath = path.resolve(filePath);
+                        if (fs.existsSync(absolutePath)) {
+                            const content = fs.readFileSync(absolutePath);
+                            const preSnapshotId = this.snapshotStore.createSnapshot(actionId, absolutePath, content, 'pre');
+                            preHash = computeSha256(content);
+                            if (this.dbManager && preSnapshotId !== 'snap_skipped_too_large') {
+                                this.dbManager.updateActionTransition(actionId, preSnapshotId, undefined, preHash);
+                            }
+                        }
+                    }
+                    catch (err) {
+                        // Non-fatal: snapshot capture failure shouldn't block the actual tool call
+                        console.error(`[undomcp] Snapshot capture failed: ${err.message}`);
+                    }
+                }
                 if (this.onRequestCallback) {
                     try {
                         await this.onRequestCallback(parsed);
@@ -273,6 +343,23 @@ export class ProxyEngine {
                         }
                         catch (err) {
                             console.error(`[undomcp] Database error in post-action logging: ${err.message}`);
+                        }
+                    }
+                    // Phase 6: Capture post-snapshot for file-modifying tools
+                    if (isFileModifying && filePath && this.snapshotStore && actionId) {
+                        try {
+                            const absolutePath = path.resolve(filePath);
+                            if (fs.existsSync(absolutePath)) {
+                                const content = fs.readFileSync(absolutePath);
+                                const postSnapshotId = this.snapshotStore.createSnapshot(actionId, absolutePath, content, 'post');
+                                const postHash = computeSha256(content);
+                                if (this.dbManager && postSnapshotId !== 'snap_skipped_too_large') {
+                                    this.dbManager.updateActionTransition(actionId, undefined, postSnapshotId, undefined, postHash);
+                                }
+                            }
+                        }
+                        catch (err) {
+                            console.error(`[undomcp] Post-snapshot capture failed: ${err.message}`);
                         }
                     }
                     if (this.onResponseCallback) {
@@ -307,6 +394,33 @@ export class ProxyEngine {
                 catch (err) {
                     console.error(`[undomcp] Error in onRequest callback: ${err.message}`);
                 }
+            }
+            // For 'initialize': respond immediately so the IDE doesn't timeout,
+            // then initialize upstreams in the background.
+            if (parsed.method === 'initialize') {
+                // Send our own initialize response right away
+                const immediateResponse = {
+                    jsonrpc: '2.0',
+                    id: parsed.id,
+                    result: {
+                        protocolVersion: parsed.params?.protocolVersion || '2024-11-05',
+                        capabilities: { tools: {} },
+                        serverInfo: {
+                            name: 'undomcp-proxy',
+                            version: '1.0.0'
+                        }
+                    }
+                };
+                this.forwardToAgent(JSON.stringify(immediateResponse), agentStdout);
+                // Initialize upstreams in background (non-blocking)
+                this.upstreamManager.broadcast('initialize', parsed.params, `bg_init_${nanoid()}`)
+                    .then(() => {
+                    // Upstreams ready — tools/list will work when called later
+                })
+                    .catch((err) => {
+                    console.error(`[undomcp] Background upstream initialization failed: ${err.message}`);
+                });
+                return;
             }
             try {
                 const response = await this.upstreamManager.broadcast(parsed.method, parsed.params, parsed.id);
@@ -372,6 +486,10 @@ export class ProxyEngine {
                     const list = handleListHistory(this.dbManager, workingDir, limit);
                     result = { content: [{ type: 'text', text: JSON.stringify(list, null, 2) }] };
                 }
+                else if (toolName === 'undomcp_undo_action') {
+                    // Phase 5: Execute undo for specified action IDs
+                    result = await this.handleUndoAction(args);
+                }
                 else {
                     error = {
                         code: -32601,
@@ -392,6 +510,103 @@ export class ProxyEngine {
             ...(error ? { error } : { result })
         };
         this.forwardToAgent(JSON.stringify(response), agentStdout);
+    }
+    /**
+     * Phase 5: Handles the undomcp_undo_action tool call.
+     * Uses UndoController for resolution, then dispatches MCP payloads via upstream.
+     */
+    async handleUndoAction(args) {
+        const actionIds = args.action_ids || [];
+        if (actionIds.length === 0) {
+            return {
+                content: [{ type: 'text', text: JSON.stringify({ error: 'No action_ids provided' }) }]
+            };
+        }
+        if (!this.dbManager) {
+            return {
+                content: [{ type: 'text', text: JSON.stringify({ error: 'Undo system not initialized' }) }]
+            };
+        }
+        const finalResults = [];
+        for (const actionId of actionIds) {
+            const action = this.dbManager.getAction(actionId);
+            if (!action) {
+                finalResults.push({
+                    actionId,
+                    success: false,
+                    outcome: 'error',
+                    error: `Action ${actionId} not found in journal.`,
+                });
+                continue;
+            }
+            if (action.state === 'undone') {
+                finalResults.push({
+                    actionId,
+                    success: true,
+                    outcome: 'already_undone',
+                });
+                continue;
+            }
+            // File-change actions: delegate to UndoController for snapshot restoration
+            if (action.actionType === 'file_change' && this.undoController) {
+                try {
+                    const controllerResults = await this.undoController.execute([actionId]);
+                    for (const cr of controllerResults) {
+                        if (cr.outcome === 'file_restored') {
+                            finalResults.push({
+                                actionId: cr.actionId,
+                                success: true,
+                                outcome: 'file_restored',
+                            });
+                        }
+                        else if (cr.outcome === 'skipped') {
+                            finalResults.push({
+                                actionId: cr.actionId,
+                                success: true,
+                                outcome: 'already_undone',
+                            });
+                        }
+                        else {
+                            finalResults.push({
+                                actionId: cr.actionId,
+                                success: false,
+                                outcome: 'error',
+                                error: cr.error || 'File restore failed',
+                            });
+                        }
+                    }
+                }
+                catch (err) {
+                    finalResults.push({
+                        actionId,
+                        success: false,
+                        outcome: 'error',
+                        error: err.message,
+                    });
+                }
+                continue;
+            }
+            // MCP actions: just mark as undone (AI agent handles the actual inverse call)
+            try {
+                this.dbManager.updateActionState(actionId, 'undone', new Date().toISOString());
+                finalResults.push({
+                    actionId,
+                    success: true,
+                    outcome: 'marked_undone',
+                });
+            }
+            catch (err) {
+                finalResults.push({
+                    actionId,
+                    success: false,
+                    outcome: 'error',
+                    error: err.message,
+                });
+            }
+        }
+        return {
+            content: [{ type: 'text', text: JSON.stringify(finalResults, null, 2) }]
+        };
     }
     forwardToAgent(line, agentStdout) {
         if (!agentStdout.destroyed) {

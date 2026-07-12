@@ -4,25 +4,30 @@
  *
  * SAFETY: All LLM-generated plans are Class D (Suggested Only).
  * They are NEVER auto-executed — always presented for user confirmation.
+ *
+ * Configuration via environment variables:
+ *   UNDOMCP_LLM_ENDPOINT — e.g. "http://localhost:11434/api/generate" or "https://api.openai.com/v1/chat/completions"
+ *   UNDOMCP_LLM_API_KEY  — API key for the endpoint
+ *   UNDOMCP_LLM_MODEL    — Model name (default: "default")
  */
 import { SchemaCache } from './schema-cache.js';
 import { Action } from '../journal/database-manager.js';
 import { InverseResolution } from './inverse-resolver.js';
 export interface LlmSolverConfig {
-    /** Master switch. If false, solve() returns null immediately. */
     enabled: boolean;
-    /** HTTP endpoint for the LLM API (e.g., http://localhost:11434/api/generate for Ollama). */
     endpoint?: string;
-    /** Model name to request (e.g., "llama3", "gpt-4o-mini"). */
-    model?: string;
-    /** Optional API key for authenticated endpoints. */
     apiKey?: string;
-    /** Request timeout in milliseconds. Defaults to 30000. */
+    model?: string;
     timeoutMs?: number;
 }
 export declare class LlmSolver {
     private config;
     constructor(config: LlmSolverConfig);
+    /**
+     * Creates an LlmSolver from environment variables.
+     * Returns null if UNDOMCP_LLM_ENDPOINT is not set.
+     */
+    static fromEnv(): LlmSolver | null;
     /**
      * Attempts to synthesize a compensating tool call using an LLM.
      *

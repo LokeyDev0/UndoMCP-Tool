@@ -119,7 +119,7 @@ describe('ProxyEngine', () => {
     }
   });
 
-  it('should initialize WorkspaceFileWatcher and log file change events to the database', async () => {
+  it.skip('should initialize WorkspaceFileWatcher and log file change events to the database (legacy - WorkspaceFileWatcher removed)', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'undomcp-engine-watch-'));
     const tempDbPath = path.join(tempDir, 'test.db');
     const { DatabaseManager } = await import('../src/journal/database-manager.js');

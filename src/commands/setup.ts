@@ -370,12 +370,40 @@ export interface SetupOptions {
   selectedClients?: { name: string; foundPath: string }[];
 }
 
+async function resolveUndomcpBinary(explicitPath?: string): Promise<string> {
+  if (explicitPath) return explicitPath;
+
+  // Try to find 'undomcp' in PATH
+  const { execSync } = await import('child_process');
+  try {
+    const whichCmd = process.platform === 'win32' ? 'where undomcp' : 'which undomcp';
+    const found = execSync(whichCmd, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim().split('\n')[0];
+    if (found && !found.endsWith('node') && !found.endsWith('node.exe')) {
+      return found;
+    }
+  } catch {
+    // Not in PATH
+  }
+
+  // Check if we're running as a compiled binary (not via node)
+  const isCompiled = !process.argv[1] || !process.argv[1].endsWith('.js');
+  if (isCompiled && !process.argv[0].endsWith('node') && !process.argv[0].endsWith('node.exe')) {
+    return process.argv[0];
+  }
+
+  // Last resort: assume 'undomcp' will be in PATH
+  return 'undomcp';
+}
+
 export async function runSetup(options: SetupOptions = {}): Promise<void> {
   const configs = getClientConfigs();
 
-  // Detect if running from compiled binary or raw node
-  const isCompiled = !process.argv[1] || !process.argv[1].endsWith('.js');
-  const undomcpBin = options.binaryPath || (isCompiled ? process.argv[0] : 'undomcp');
+  // Resolve the undomcp binary path reliably:
+  // 1. Explicit --binary-path flag (highest priority)
+  // 2. Check if 'undomcp' is in PATH (works after npm install -g or npm link)
+  // 3. Fall back to process.argv[0] for compiled single-binary distributions
+  // 4. Last resort: bare 'undomcp' (assumes it will be in PATH)
+  const undomcpBin = await resolveUndomcpBinary(options.binaryPath);
 
   // --- Determine which config files to process ---
   let targetPaths: Set<string>;
@@ -604,6 +632,8 @@ files, or work around the problem in any way. Stop immediately and report the er
 1. Call the \\\`undomcp_list_history\\\` tool. It returns a JSON array of ALL recent MCP
    tool calls made in this project (across all sessions, even after IDE restarts).
    The array is ordered oldest-first (index 0 = oldest, last index = newest).
+   Each entry includes a \\\`depends_on\\\` array showing structural dependencies
+   between actions (shared resource IDs, confidence levels).
 2. **Filter the results:** Only show actions that are **state-changing and reversible**.
    - **INCLUDE** (mutating): tools that create, update, patch, delete, move, post
      (e.g., \\\`API-post-page\\\`, \\\`API-patch-page\\\`, \\\`API-delete-a-block\\\`,
@@ -633,7 +663,7 @@ files, or work around the problem in any way. Stop immediately and report the er
 After presenting the list, ask:
 > "Which change do you want to undo?"
 > - Say **\\\`undo #N\\\`** to undo just that one specific change.
-> - Say **\\\`undo till #N\\\`** to undo everything more recent than #N (changes #1 through #N-1). Change #N and older will be kept.
+> - Say **\\\`undo till #N\\\`** to undo changes #1 through #N (inclusive). Everything older than #N is kept.
 
 If the user references a change number that does not exist in the list, tell them
 the valid range. For example: "Valid range is #1 to #5. Please pick a number in
@@ -650,16 +680,25 @@ Based on the user's choice, build an undo plan:
   > If you undo #N without also undoing #M, change #M will break. Do you also want
   > to undo #M?"
   Let the user decide whether to include the dependent changes.
-- **\\\`undo till #N\\\`**: Changes #1, #2, #3, ... #N-1 (everything more recent than #N).
-  Change #N itself and everything older (#N, #N+1, ... to the end) are kept.
+- **\\\`undo till #N\\\`**: Changes #1, #2, #3, ... #N (inclusive). Everything numbered higher than #N is kept.
 
-**Classify each change to be undone:**
-- **Auto-reversible**: An inverse MCP tool exists that you can call (e.g.,
-  \\\`API-post-page\\\` can be undone with \\\`API-patch-page\\\` setting \\\`in_trash: true\\\`;
-  \\\`createDocument\\\` can be undone with \\\`deleteDocument\\\`). Determine this by looking
-  at the available MCP tools and the parameters/results of the original call.
-- **Manual-only**: No inverse MCP tool exists, or the reverse action could be
-  harmful or irreversible. Some tools only create but have no destroy counterpart.
+**Classify each change to be undone — YOU must reason about the inverse:**
+For each action, inspect its \\\`toolName\\\`, \\\`parameters\\\`, and \\\`resultData\\\` from the
+history entry. The \\\`resultData\\\` often contains an MCP content wrapper like:
+\\\`{ "content": [{ "type": "text", "text": "{...}" }] }\\\`
+— you MUST parse the stringified JSON inside \\\`content[0].text\\\` to extract
+resource IDs, page IDs, object types, etc.
+
+Then check what MCP tools are available to you and determine:
+- **Auto-reversible**: You can call an available MCP tool to reverse this action.
+  Examples:
+  - \\\`API-post-page\\\` (page created) → call \\\`API-patch-page\\\` with the created
+    page's ID and \\\`{ "in_trash": true }\\\` to trash it.
+  - \\\`API-patch-page\\\` (page updated) → call \\\`API-patch-page\\\` with the original
+    property values to restore them.
+  - \\\`createDocument\\\` → call \\\`deleteDocument\\\` with the created document's ID.
+- **Manual-only**: No viable inverse MCP tool exists, or the reverse action could
+  be harmful or irreversible.
 
 **Present the plan as a numbered list showing each change, its classification, and what will happen. Include any dependency warnings.**
 
@@ -668,22 +707,26 @@ Ask the user: **"Do you want to proceed with this plan? (yes/no)"**
 Do NOT execute anything until the user explicitly says yes.
 
 ### Step 4 — Execute Undo
-After the user approves:
-1. Execute the auto-reversible changes in order from **most recent first**
-   (#1 first, then #2, then #3, etc.).
-2. For each change, call the appropriate inverse MCP tool with the correct
-   parameters derived from the original call's parameters and results.
-3. Be careful not to disturb any changes that were NOT selected for undo.
-4. Report the result of each undo step as you go.
+After the user approves, execute each undo **in reverse chronological order**
+(most recent first):
 
-**CRITICAL SAFETY RULE:** You must ONLY call the inverse MCP tool for the specific
-change(s) the user selected. Do NOT modify, update, or call any other MCP tool for
-any other purpose during the undo process. Do NOT make "related" or "cleanup"
-changes that the user did not explicitly approve. If you are unsure whether an
-inverse call is safe, classify it as manual-only and let the user handle it.
+1. **For each auto-reversible action:**
+   a. Call the inverse MCP tool directly yourself (e.g., call \\\`API-patch-page\\\`
+      with \\\`{ "page_id": "...", "in_trash": true }\\\`). You have access to all MCP
+      tools — use them.
+   b. After the inverse call succeeds, call \\\`undomcp_undo_action\\\` with that
+      action's ID to mark it as undone in the journal.
+   c. Report the result to the user.
+
+2. **For file-change actions:** Call \\\`undomcp_undo_action\\\` with the action ID.
+   The tool handles file snapshot restoration automatically.
+
+3. **For manual-only actions:** Skip the inverse call. Still call
+   \\\`undomcp_undo_action\\\` to mark it as acknowledged, then provide manual
+   instructions in the summary.
 
 ### Step 5 — Summary & Manual Guide
-After all automated undos are complete:
+After all undos are complete:
 
 1. Show a success summary listing each change that was successfully undone.
 
@@ -713,6 +756,7 @@ files, or work around the problem in any way. Stop immediately and report the er
 1. Call the \\\`undomcp_list_history\\\` tool. It returns a JSON array of ALL recent MCP
    tool calls made in this project (across all sessions, even after IDE restarts).
    The array is ordered oldest-first (index 0 = oldest, last index = newest).
+   Each entry includes a \\\`depends_on\\\` array showing structural dependencies.
 2. **Filter the results:** Only show actions that are **state-changing and reversible**.
    - **INCLUDE** (mutating): tools that create, update, patch, delete, move, post.
    - **EXCLUDE** (read-only): tools that get, retrieve, list, search, query, read,
@@ -732,7 +776,7 @@ files, or work around the problem in any way. Stop immediately and report the er
 After presenting the list, ask:
 > "Which change do you want to undo?"
 > - Say **\\\`undo #N\\\`** to undo just that one specific change.
-> - Say **\\\`undo till #N\\\`** to undo everything more recent than #N (changes #1 through #N-1). Change #N and older will be kept.
+> - Say **\\\`undo till #N\\\`** to undo changes #1 through #N (inclusive). Everything older than #N is kept.
 
 If the user references a change number that does not exist in the list, tell them
 the valid range. For example: "Valid range is #1 to #5. Please pick a number in
@@ -742,23 +786,24 @@ that range."
 Based on the user's choice, build an undo plan:
 - **\\\`undo #N\\\`**: Only change #N. Check if any more recent changes depend on #N's
   output. If yes, warn the user and ask if they want to also undo those.
-- **\\\`undo till #N\\\`**: Changes #1, #2, ... #N-1. Keep #N and older.
+- **\\\`undo till #N\\\`**: Changes #1, #2, #3, ... #N (inclusive). Everything numbered higher than #N is kept.
 
-For each change, classify as:
-- **Auto-reversible**: An inverse MCP tool exists.
-- **Manual-only**: No inverse exists or reversal could be harmful.
+For each change, YOU must reason about the inverse by inspecting \\\`toolName\\\`,
+\\\`parameters\\\`, and \\\`resultData\\\`. Parse stringified JSON in \\\`resultData.content[0].text\\\`
+to extract resource IDs. Classify as:
+- **Auto-reversible**: You can call an available MCP tool to reverse this action.
+- **Manual-only**: No viable inverse exists or reversal could be harmful.
 
 Present the plan with classifications and dependency warnings. Ask the user to
 confirm before executing.
 
 ### Step 4 — Execute Undo
-After approval, execute auto-reversible changes from most recent first. Report
-each step. Do not disturb unselected changes.
-
-**CRITICAL SAFETY RULE:** You must ONLY call the inverse MCP tool for the specific
-change(s) the user selected. Do NOT modify, update, or call any other MCP tool for
-any other purpose during the undo process. Do NOT make "related" or "cleanup"
-changes that the user did not explicitly approve.
+After approval, execute in reverse chronological order:
+1. **Auto-reversible**: Call the inverse MCP tool directly yourself, then call
+   \\\`undomcp_undo_action\\\` to mark it as undone in the journal.
+2. **File-change actions**: Call \\\`undomcp_undo_action\\\` (handles snapshot restore).
+3. **Manual-only**: Call \\\`undomcp_undo_action\\\` to mark as acknowledged, provide
+   manual instructions in summary.
 
 ### Step 5 — Summary & Manual Guide
 Show a success summary. If any changes were manual-only, present a "Manual Undo
@@ -799,7 +844,7 @@ files, or work around the problem in any way. Stop immediately and report the er
 After presenting the list, ask:
 > "Which change do you want to undo?"
 > - Say **\\\`undo #N\\\`** to undo just that one specific change.
-> - Say **\\\`undo till #N\\\`** to undo everything more recent than #N (changes #1 through #N-1). Change #N and older will be kept.
+> - Say **\\\`undo till #N\\\`** to undo changes #1 through #N (inclusive). Everything older than #N is kept.
 
 If the user references a change number that does not exist in the list, tell them
 the valid range. For example: "Valid range is #1 to #5. Please pick a number in
@@ -809,23 +854,24 @@ that range."
 Based on the user's choice, build an undo plan:
 - **\\\`undo #N\\\`**: Only change #N. Check if any more recent changes depend on #N's
   output. If yes, warn the user and ask if they want to also undo those.
-- **\\\`undo till #N\\\`**: Changes #1, #2, ... #N-1. Keep #N and older.
+- **\\\`undo till #N\\\`**: Changes #1, #2, #3, ... #N (inclusive). Everything numbered higher than #N is kept.
 
-For each change, classify as:
-- **Auto-reversible**: An inverse MCP tool exists.
-- **Manual-only**: No inverse exists or reversal could be harmful.
+For each change, YOU must reason about the inverse by inspecting \\\`toolName\\\`,
+\\\`parameters\\\`, and \\\`resultData\\\`. Parse stringified JSON in \\\`resultData.content[0].text\\\`
+to extract resource IDs. Classify as:
+- **Auto-reversible**: You can call an available MCP tool to reverse this action.
+- **Manual-only**: No viable inverse exists or reversal could be harmful.
 
 Present the plan with classifications and dependency warnings. Ask the user to
 confirm before executing.
 
 ### Step 4 — Execute Undo
-After approval, execute auto-reversible changes from most recent first. Report
-each step. Do not disturb unselected changes.
-
-**CRITICAL SAFETY RULE:** You must ONLY call the inverse MCP tool for the specific
-change(s) the user selected. Do NOT modify, update, or call any other MCP tool for
-any other purpose during the undo process. Do NOT make "related" or "cleanup"
-changes that the user did not explicitly approve.
+After approval, execute in reverse chronological order:
+1. **Auto-reversible**: Call the inverse MCP tool directly yourself, then call
+   \`undomcp_undo_action\` to mark it as undone in the journal.
+2. **File-change actions**: Call \`undomcp_undo_action\` (handles snapshot restore).
+3. **Manual-only**: Call \`undomcp_undo_action\` to mark as acknowledged, provide
+   manual instructions in summary.
 
 ### Step 5 — Summary & Manual Guide
 Show a success summary. If any changes were manual-only, present a "Manual Undo

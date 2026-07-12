@@ -3,42 +3,25 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { DatabaseManager, Action } from '../src/journal/database-manager.js';
-import { SnapshotStore } from '../src/file-safety/snapshot-store.js';
-import { SchemaCache } from '../src/undo/schema-cache.js';
-import { InverseResolver } from '../src/undo/inverse-resolver.js';
-import { UndoController } from '../src/undo/undo-controller.js';
-import {
-  handleInteractive,
-  handleListTurns,
-  handlePreviewUndo,
-  handleUndoSelection
-} from '../src/tools/undo-tools.js';
+import { UNDO_TOOLS, handleListHistory } from '../src/tools/undo-tools.js';
 
-describe('Undo Tools Handlers', () => {
+describe('Undo Tools', () => {
   let tempDir: string;
   let tempDbPath: string;
   let dbManager: DatabaseManager;
-  let snapshotStore: SnapshotStore;
-  let schemaCache: SchemaCache;
-  let inverseResolver: InverseResolver;
-  let undoController: UndoController;
   const sessionId = 'tools_test_sess_1';
   const turnId1 = 'tools_test_turn_1';
-  const turnId2 = 'tools_test_turn_2';
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'undomcp-tools-test-'));
     tempDbPath = path.join(tempDir, 'test.db');
     dbManager = new DatabaseManager(tempDbPath);
-    snapshotStore = new SnapshotStore(dbManager);
-    schemaCache = new SchemaCache();
-    inverseResolver = new InverseResolver(schemaCache);
-    undoController = new UndoController(dbManager, snapshotStore, schemaCache, inverseResolver);
 
     // Create session and turns
     dbManager.createSession({
       id: sessionId,
       startedAt: new Date().toISOString(),
+      workingDirectory: tempDir,
     });
     dbManager.createTurn({
       id: turnId1,
@@ -47,38 +30,6 @@ describe('Undo Tools Handlers', () => {
       promptText: 'First prompt',
       timestamp: new Date().toISOString(),
       actionCount: 0,
-    });
-    dbManager.createTurn({
-      id: turnId2,
-      sessionId,
-      turnNum: 2,
-      promptText: 'Second prompt',
-      timestamp: new Date().toISOString(),
-      actionCount: 0,
-    });
-
-    // Cache tools schemas
-    schemaCache.updateFromToolsList({
-      tools: [
-        {
-          name: 'create_item',
-          description: 'Creates item',
-          inputSchema: {
-            type: 'object',
-            properties: { id: { type: 'string' } },
-            required: ['id']
-          }
-        },
-        {
-          name: 'delete_item',
-          description: 'Deletes item',
-          inputSchema: {
-            type: 'object',
-            properties: { id: { type: 'string' } },
-            required: ['id']
-          }
-        }
-      ]
     });
   });
 
@@ -103,157 +54,172 @@ describe('Undo Tools Handlers', () => {
     };
     dbManager.createAction(action);
 
-    if (action.resultData || action.postHash) {
+    if (overrides.resultData !== undefined || overrides.resultSuccess !== undefined) {
       dbManager.updateActionResults(
         action.id,
-        action.resultSuccess !== undefined ? !!action.resultSuccess : true,
-        action.resultData,
-        action.resultLatencyMs,
-        action.postHash
+        overrides.resultSuccess !== undefined ? !!overrides.resultSuccess : true,
+        overrides.resultData
       );
     }
     return action;
   }
 
-  describe('handleInteractive', () => {
-    it('should generate a markdown checklist from logged turns and actions', () => {
+  describe('UNDO_TOOLS', () => {
+    it('should define exactly 3 tools', () => {
+      expect(UNDO_TOOLS).toHaveLength(3);
+    });
+
+    it('should contain undomcp_mark_turn', () => {
+      const tool = UNDO_TOOLS.find(t => t.name === 'undomcp_mark_turn');
+      expect(tool).toBeDefined();
+      expect(tool!.inputSchema.required).toContain('prompt_text');
+    });
+
+    it('should contain undomcp_list_history', () => {
+      const tool = UNDO_TOOLS.find(t => t.name === 'undomcp_list_history');
+      expect(tool).toBeDefined();
+      expect(tool!.inputSchema.properties).toHaveProperty('limit');
+    });
+
+    it('should contain undomcp_undo_action', () => {
+      const tool = UNDO_TOOLS.find(t => t.name === 'undomcp_undo_action');
+      expect(tool).toBeDefined();
+      expect(tool!.inputSchema.required).toContain('action_ids');
+    });
+  });
+
+  describe('handleListHistory', () => {
+    it('should return empty array when no actions exist', () => {
+      const result = handleListHistory(dbManager, tempDir, 10);
+      expect(result).toEqual([]);
+    });
+
+    it('should return actions for the project', () => {
       createTestAction({
         turnId: turnId1,
         sequenceNum: 1,
         toolName: 'create_item',
         parameters: { id: 'item1' },
         resultData: { id: 'item1' },
-        metadata: { label: 'Create item item1' }
+        resultSuccess: 1 as any,
       });
 
-      const output = handleInteractive(dbManager, sessionId);
-      expect(output).toContain('### Recent turns and changes:');
-      expect(output).toContain('**Turn #1**: "First prompt"');
-      expect(output).toContain('[ ] Create item item1');
+      const result = handleListHistory(dbManager, tempDir, 10);
+      expect(result).toHaveLength(1);
+      expect(result[0].toolName).toBe('create_item');
+      expect(result[0].success).toBe(true);
     });
 
-    it('should return empty message when no turns exist', () => {
-      // Clear turns from DB (not easily possible with current dbManager APIs unless we create a clean session without turns)
-      const cleanSessionId = 'empty_sess_1';
-      dbManager.createSession({ id: cleanSessionId, startedAt: new Date().toISOString() });
-      const output = handleInteractive(dbManager, cleanSessionId);
-      expect(output).toContain('No turns logged');
-    });
-  });
+    it('should respect the limit parameter', () => {
+      for (let i = 1; i <= 5; i++) {
+        createTestAction({
+          turnId: turnId1,
+          sequenceNum: i,
+          toolName: `tool_${i}`,
+          parameters: {},
+          resultSuccess: 1 as any,
+        });
+      }
 
-  describe('handleListTurns', () => {
-    it('should return formatted list of turns and their actions', () => {
+      const result = handleListHistory(dbManager, tempDir, 3);
+      expect(result).toHaveLength(3);
+    });
+
+    it('should include depends_on array (initially empty for unrelated actions)', () => {
       createTestAction({
         turnId: turnId1,
         sequenceNum: 1,
-        toolName: 'create_item',
-        parameters: { id: 'item1' },
-        resultData: { id: 'item1' },
-        metadata: { label: 'Create item item1' }
+        toolName: 'tool_a',
+        parameters: { foo: 'bar' },
+        resultSuccess: 1 as any,
       });
 
-      const list = handleListTurns(dbManager, sessionId);
-      expect(list.length).toBe(2); // turn 1 and turn 2
-      // Check turn 1 properties
-      const turn1Obj = list.find(t => t.id === turnId1);
-      expect(turn1Obj).toBeDefined();
-      expect(turn1Obj?.promptText).toBe('First prompt');
-      expect(turn1Obj?.actions.length).toBe(1);
-      expect(turn1Obj?.actions[0].toolName).toBe('create_item');
-      expect(turn1Obj?.actions[0].label).toBe('Create item item1');
+      const result = handleListHistory(dbManager, tempDir, 10);
+      expect(result[0]).toHaveProperty('depends_on');
+      expect(result[0].depends_on).toEqual([]);
     });
   });
 
-  describe('handlePreviewUndo', () => {
-    it('should generate previews for selected actions and turns', async () => {
+  describe('Dependency Detection', () => {
+    it('should detect high-confidence dependency when result ID is consumed as parameter', () => {
+      // Action 1 produces an ID
       const act1 = createTestAction({
         turnId: turnId1,
         sequenceNum: 1,
-        toolName: 'create_item',
-        parameters: { id: 'item1' },
-        resultData: { id: 'item1' },
+        toolName: 'create_project',
+        parameters: { name: 'test' },
+        resultData: { id: 'proj_abc123def456' },
+        resultSuccess: 1 as any,
       });
 
-      const previews = await handlePreviewUndo(dbManager, undoController, sessionId, [act1.id]);
-      expect(previews.length).toBe(1);
-      expect(previews[0].actionId).toBe(act1.id);
-      expect(previews[0].resolution?.inverseTool).toBe('delete_item');
+      // Action 2 consumes that ID
+      const act2 = createTestAction({
+        turnId: turnId1,
+        sequenceNum: 2,
+        toolName: 'add_member',
+        parameters: { project_id: 'proj_abc123def456', user: 'alice' },
+        resultSuccess: 1 as any,
+      });
+
+      const result = handleListHistory(dbManager, tempDir, 10);
+      // Find the add_member entry — it should depend on create_project
+      const addMember = result.find(r => r.toolName === 'add_member');
+      expect(addMember).toBeDefined();
+      expect(addMember!.depends_on.length).toBeGreaterThanOrEqual(1);
+      expect(addMember!.depends_on[0].action_id).toBe(act1.id);
+      expect(addMember!.depends_on[0].shared_values).toContain('proj_abc123def456');
+      expect(addMember!.depends_on[0].confidence).toBe('high');
     });
 
-    it('should resolve actions from turn IDs in preview', async () => {
+    it('should detect medium-confidence dependency for same-resource operations', () => {
+      // Two actions on the same resource
       const act1 = createTestAction({
         turnId: turnId1,
         sequenceNum: 1,
-        toolName: 'create_item',
-        parameters: { id: 'item1' },
-        resultData: { id: 'item1' },
+        toolName: 'update_project',
+        parameters: { id: 'proj_abc123def456', title: 'v1' },
+        resultSuccess: 1 as any,
       });
 
-      const previews = await handlePreviewUndo(dbManager, undoController, sessionId, [], [turnId1]);
-      expect(previews.length).toBe(1);
-      expect(previews[0].actionId).toBe(act1.id);
-    });
-  });
-
-  describe('handleUndoSelection', () => {
-    it('should execute undo for selected action IDs', async () => {
-      const act1 = createTestAction({
+      const act2 = createTestAction({
         turnId: turnId1,
-        sequenceNum: 1,
-        toolName: 'create_item',
-        parameters: { id: 'item1' },
-        resultData: { id: 'item1' },
+        sequenceNum: 2,
+        toolName: 'update_project',
+        parameters: { id: 'proj_abc123def456', title: 'v2' },
+        resultSuccess: 1 as any,
       });
 
-      const results = await handleUndoSelection(dbManager, undoController, sessionId, [act1.id]);
-      expect(results.length).toBe(1);
-      expect(results[0].success).toBe(true);
-      expect(results[0].outcome).toBe('mcp_payload_ready');
-      expect(results[0].mcpPayload?.params.name).toBe('delete_item');
-      expect(results[0].mcpPayload?.params.arguments.id).toBe('item1');
+      const result = handleListHistory(dbManager, tempDir, 10);
+      const secondUpdate = result.find(r => r.id === act2.id);
+      expect(secondUpdate).toBeDefined();
+      // Should have at least a medium-confidence dependency
+      const dep = secondUpdate!.depends_on.find(d => d.action_id === act1.id);
+      expect(dep).toBeDefined();
     });
 
-    it('should override Class D confirmation when confirmClassD is true', async () => {
-      // Mock an unknown action which resolves to Class D (or has no direct heuristic, but LLM solver isn't present, so it fails heuristic. Let's create an action that resolves to Class D. Wait, how to make it Class D?
-      // Ah! We can manually insert a resolved Class D action into the DB but with status 'executed', wait, resolution is computed dynamically using inverseResolver.resolve().
-      // How does inverseResolver resolve Class D?
-      // It doesn't! The LLM solver returns Class D.
-      // So let's mock LlmSolver to return a Class D suggestion.
-      const { LlmSolver } = await import('../src/undo/llm-solver.js');
-      const mockLlmSolver = new LlmSolver({ enabled: true, endpoint: 'http://localhost' });
-      // Stub the solve method
-      mockLlmSolver.solve = async () => ({
-        inverseTool: 'delete_item',
-        inverseParams: { id: 'item99' },
-        source: 'llm_suggestion',
-        confidence: 0.3,
-        reversibilityClass: 'D'
-      });
-
-      const controllerWithLlm = new UndoController(dbManager, snapshotStore, schemaCache, inverseResolver, mockLlmSolver);
-
-      const act1 = createTestAction({
+    it('should not create false dependencies for non-identifier strings', () => {
+      createTestAction({
         turnId: turnId1,
         sequenceNum: 1,
-        toolName: 'unknown_tool',
-        parameters: { id: 'item1' },
+        toolName: 'tool_a',
+        parameters: { name: 'test' },
+        resultData: { status: 'ok', value: 'true' },
+        resultSuccess: 1 as any,
       });
 
-      // Without confirmClassD: should return requires_confirmation
-      const res1 = await handleUndoSelection(dbManager, controllerWithLlm, sessionId, [act1.id], [], false);
-      expect(res1[0].outcome).toBe('requires_confirmation');
+      createTestAction({
+        turnId: turnId1,
+        sequenceNum: 2,
+        toolName: 'tool_b',
+        parameters: { name: 'test', check: 'true' },
+        resultSuccess: 1 as any,
+      });
 
-      // Reset action state to executed
-      dbManager.updateActionState(act1.id, 'executed');
-
-      // With confirmClassD: should bypass and return mcp_payload_ready
-      const res2 = await handleUndoSelection(dbManager, controllerWithLlm, sessionId, [act1.id], [], true);
-      expect(res2[0].outcome).toBe('mcp_payload_ready');
-      expect(res2[0].mcpPayload?.params.name).toBe('delete_item');
-      expect(res2[0].mcpPayload?.params.arguments.id).toBe('item99');
-      
-      const dbAction = dbManager.getAction(act1.id);
-      expect(dbAction?.state).toBe('undone');
+      const result = handleListHistory(dbManager, tempDir, 10);
+      const toolB = result.find(r => r.toolName === 'tool_b');
+      // 'true', 'ok', 'test' are too short/common to be IDs — no high-confidence deps
+      const highDeps = toolB!.depends_on.filter(d => d.confidence === 'high');
+      expect(highDeps).toHaveLength(0);
     });
   });
 });

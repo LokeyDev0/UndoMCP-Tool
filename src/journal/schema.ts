@@ -53,18 +53,35 @@ export const CREATE_ACTIONS_TABLE = `
   );
 `;
 
+export const CREATE_SNAPSHOTS_TABLE = `
+  CREATE TABLE IF NOT EXISTS snapshots (
+    id TEXT PRIMARY KEY,
+    action_id TEXT REFERENCES actions(id) ON DELETE SET NULL,
+    file_path TEXT NOT NULL,
+    snapshot_role TEXT NOT NULL,  -- 'pre', 'post', 'baseline'
+    content BLOB NOT NULL,       -- zlib-compressed file content
+    original_size INTEGER NOT NULL,
+    compressed_size INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+`;
+
 export const CREATE_INDEXES = [
   'CREATE INDEX IF NOT EXISTS idx_actions_session ON actions(session_id, sequence_num);',
   'CREATE INDEX IF NOT EXISTS idx_actions_timestamp ON actions(timestamp);',
   'CREATE INDEX IF NOT EXISTS idx_actions_state ON actions(state);',
   'CREATE INDEX IF NOT EXISTS idx_actions_turn ON actions(turn_id);',
   'CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, turn_num);',
-  'CREATE INDEX IF NOT EXISTS idx_sessions_working_dir ON sessions(working_directory);'
+  'CREATE INDEX IF NOT EXISTS idx_sessions_working_dir ON sessions(working_directory);',
+  'CREATE INDEX IF NOT EXISTS idx_snapshots_action ON snapshots(action_id);',
+  'CREATE INDEX IF NOT EXISTS idx_snapshots_path ON snapshots(file_path);'
 ];
 
 export const MIGRATIONS = [
   CREATE_SESSIONS_TABLE,
   CREATE_TURNS_TABLE,
   CREATE_ACTIONS_TABLE,
+  CREATE_SNAPSHOTS_TABLE,
   ...CREATE_INDEXES
 ];

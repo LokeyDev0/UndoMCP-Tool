@@ -1,14 +1,25 @@
-/**
- * LlmSolver — Optional LLM-guided fallback for synthesizing compensating payloads
- * when heuristic resolution fails.
- *
- * SAFETY: All LLM-generated plans are Class D (Suggested Only).
- * They are NEVER auto-executed — always presented for user confirmation.
- */
 export class LlmSolver {
     config;
     constructor(config) {
         this.config = config;
+    }
+    /**
+     * Creates an LlmSolver from environment variables.
+     * Returns null if UNDOMCP_LLM_ENDPOINT is not set.
+     */
+    static fromEnv() {
+        const endpoint = process.env.UNDOMCP_LLM_ENDPOINT;
+        if (!endpoint)
+            return null;
+        return new LlmSolver({
+            enabled: true,
+            endpoint,
+            apiKey: process.env.UNDOMCP_LLM_API_KEY,
+            model: process.env.UNDOMCP_LLM_MODEL,
+            timeoutMs: process.env.UNDOMCP_LLM_TIMEOUT_MS
+                ? parseInt(process.env.UNDOMCP_LLM_TIMEOUT_MS, 10)
+                : 30000,
+        });
     }
     /**
      * Attempts to synthesize a compensating tool call using an LLM.

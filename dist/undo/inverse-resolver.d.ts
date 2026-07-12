@@ -8,7 +8,7 @@ import { Action } from '../journal/database-manager.js';
 export interface InverseResolution {
     inverseTool: string;
     inverseParams: Record<string, any>;
-    source: 'filesystem_shadow' | 'heuristic' | 'llm_suggestion';
+    source: 'explicit_contract' | 'filesystem_shadow' | 'heuristic' | 'llm_suggestion';
     confidence: number;
     reversibilityClass: 'A' | 'B' | 'C' | 'D';
 }
@@ -22,6 +22,7 @@ export declare class InverseResolver {
      * 1. File-system shadow (Class A) — if the action is a file change with a pre-snapshot.
      * 2. Verb-pair heuristic (Class B) — match tool name to an inverse tool in the schema cache.
      * 3. Same-tool restore (Class C) — for update/set operations where pre-state params exist.
+     * 4. Patch/archive soft-delete (Class B) — finds update tool with in_trash/archived boolean.
      */
     resolve(action: Action): InverseResolution | null;
     /**

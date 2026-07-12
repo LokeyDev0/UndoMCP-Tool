@@ -71,8 +71,8 @@ describe('Proxy Interception and Compensating Calls', () => {
             // Verify mock server tools + custom undomcp tools
             const tools = parsed.result.tools;
             expect(tools.some((t: any) => t.name === 'mock_tool')).toBe(true);
-            expect(tools.some((t: any) => t.name === 'undomcp_interactive')).toBe(true);
-            expect(tools.some((t: any) => t.name === 'undomcp_undo_selection')).toBe(true);
+            expect(tools.some((t: any) => t.name === 'undomcp_mark_turn')).toBe(true);
+            expect(tools.some((t: any) => t.name === 'undomcp_undo_action')).toBe(true);
             
             proxy.stop();
             resolve();
@@ -145,7 +145,7 @@ describe('Proxy Interception and Compensating Calls', () => {
             
             expect(finalResults.length).toBe(1);
             expect(finalResults[0].success).toBe(true);
-            expect(finalResults[0].outcome).toBe('mcp_payload_ready');
+            expect(finalResults[0].outcome).toBe('marked_undone');
 
             // Verify action is marked as undone in DB
             const updated = dbManager.getAction('act_test_compensate');
@@ -160,14 +160,14 @@ describe('Proxy Interception and Compensating Calls', () => {
         }
       });
 
-      // Send the undomcp_undo_selection request
+      // Send the undomcp_undo_action request
       const undoRequest = {
         jsonrpc: '2.0',
         id: 2,
         method: 'tools/call',
         params: {
-          name: 'undomcp_undo_selection',
-          arguments: { actionIds: ['act_test_compensate'] }
+          name: 'undomcp_undo_action',
+          arguments: { action_ids: ['act_test_compensate'] }
         }
       };
       agentStdin.write(JSON.stringify(undoRequest) + '\n');

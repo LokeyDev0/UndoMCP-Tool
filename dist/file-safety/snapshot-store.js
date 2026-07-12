@@ -1,6 +1,12 @@
+/**
+ * SnapshotStore — Manages compressed file snapshots stored in the database
+ * for undo/restore operations.
+ */
 import * as zlib from 'zlib';
 import * as crypto from 'crypto';
 import { nanoid } from 'nanoid';
+/** Maximum file size to snapshot (10 MB) */
+const MAX_SNAPSHOT_SIZE = 10 * 1024 * 1024;
 /**
  * Computes the SHA-256 hash of a buffer.
  */
@@ -15,25 +21,31 @@ export class SnapshotStore {
     /**
      * Compresses the file content using deflate and saves it in the database.
      * Returns the generated snapshot ID.
+     *
+     * Files larger than MAX_SNAPSHOT_SIZE (10 MB) are skipped to avoid
+     * blocking the proxy and inflating the database.
      */
     createSnapshot(actionId, filePath, content, role) {
+        if (content.length > MAX_SNAPSHOT_SIZE) {
+            console.error(`[undomcp] Skipping snapshot for ${filePath}: file size ${content.length} exceeds ${MAX_SNAPSHOT_SIZE} byte limit.`);
+            return 'snap_skipped_too_large';
+        }
         const sha256 = computeSha256(content);
         const originalSize = content.length;
         // Compress content using native deflate
         const compressedBuffer = zlib.deflateSync(content);
         const snapshotId = `snap_${nanoid()}`;
-        const snapshot = {
+        this.dbManager.createSnapshot({
             id: snapshotId,
             actionId,
             filePath,
-            content: compressedBuffer,
             snapshotRole: role,
+            content: compressedBuffer,
             originalSize,
             compressedSize: compressedBuffer.length,
             sha256,
-            createdAt: new Date().toISOString()
-        };
-        this.dbManager.createSnapshot(snapshot);
+            createdAt: new Date().toISOString(),
+        });
         return snapshotId;
     }
     /**

@@ -5,7 +5,7 @@
 export function diffLines(oldLines, newLines) {
     const n = oldLines.length;
     const m = newLines.length;
-    if (n * m > 4000000) {
+    if (n * m > 4_000_000) {
         // Large files: fallback to simple block comparison to avoid memory limits
         return fallbackDiff(oldLines, newLines);
     }

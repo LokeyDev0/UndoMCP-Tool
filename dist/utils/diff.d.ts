@@ -1,5 +1,8 @@
+/**
+ * DiffLine — Represents a single line in a diff result.
+ */
 export interface DiffLine {
-    type: 'added' | 'removed' | 'unchanged';
+    type: 'unchanged' | 'added' | 'removed';
     content: string;
 }
 /**

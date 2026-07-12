@@ -1,8 +1,3 @@
-/**
- * InverseResolver — Automatically determines the compensating (inverse) tool call
- * for a given logged action using verb-matching heuristics and parameter mapping
- * from cached tool schemas.
- */
 const VERB_PAIRS = [
     { forwardPattern: /^create[_-]/, forwardPrefix: 'create', inversePrefix: 'delete', confidence: 0.9 },
     { forwardPattern: /^add[_-]/, forwardPrefix: 'add', inversePrefix: 'remove', confidence: 0.9 },
@@ -39,6 +34,7 @@ export class InverseResolver {
      * 1. File-system shadow (Class A) — if the action is a file change with a pre-snapshot.
      * 2. Verb-pair heuristic (Class B) — match tool name to an inverse tool in the schema cache.
      * 3. Same-tool restore (Class C) — for update/set operations where pre-state params exist.
+     * 4. Patch/archive soft-delete (Class B) — finds update tool with in_trash/archived boolean.
      */
     resolve(action) {
         // 1. File-system shadow (Class A)
@@ -310,7 +306,7 @@ export class InverseResolver {
                 continue;
             const inverseParams = {
                 [idParam]: mappedIdValue,
-                [deleteParam]: true
+                [deleteParam]: true,
             };
             let satisfiedAllRequired = true;
             for (const req of required) {
@@ -331,7 +327,7 @@ export class InverseResolver {
                 inverseParams,
                 source: 'heuristic',
                 confidence: 0.85,
-                reversibilityClass: 'B'
+                reversibilityClass: 'B',
             };
         }
         return null;
