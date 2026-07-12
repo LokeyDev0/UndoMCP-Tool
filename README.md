@@ -36,10 +36,26 @@ UndoMcp is a install and forget tool. Works automatically. Persists across sessi
 
 ## Installation
 
-<!-- INSTALLATION -->
+### Prerequisites
+
+- [Node.js](https://nodejs.org/) (v18 or later) — required for the npm install method
+
+### npm (macOS / Linux / Windows)
 
 ```bash
-# Coming soon — see below for distribution options
+npm install -g undomcp && undomcp setup
+```
+
+> On macOS/Linux, if you get a permission error, run with `sudo`:
+> ```bash
+> sudo npm install -g undomcp && undomcp setup
+> ```
+
+### Verify Installation
+
+```bash
+undomcp --version
+undomcp --help
 ```
 
 ---
