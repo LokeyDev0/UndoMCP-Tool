@@ -1,126 +1,81 @@
 <p align="center">
   <h1 align="center">UndoMCP</h1>
   <p align="center"><strong>Ctrl+Z for AI agent actions.</strong></p>
-  <p align="center">Universal undo for every MCP tool call, across all IDEs, all servers, all sessions.</p>
+  <p align="center">Undo any MCP tool call. Any server. Any IDE. Across sessions.</p>
 </p>
 
 <p align="center">
   <a href="#installation">Install</a> •
-  <a href="#how-it-works">How it works</a> •
+  <a href="#how-it-works">How It Works</a> •
+  <a href="#supported-ades">Supported ADEs</a> •
   <a href="#usage">Usage</a> •
-  <a href="#supported-ides">Supported IDEs</a> •
-  <a href="#faq">FAQ</a>
+  <a href="#uninstall">Uninstall</a>
 </p>
 
 ---
 
 ## The Problem
 
-Your AI agent edits a Notion page, creates a Stripe customer, modifies an AWS config — all through MCP. Then something goes wrong. There's no undo. You're stuck manually figuring out what changed and reversing it yourself.
+AI agents make changes through MCP — editing Notion pages, creating Stripe customers, modifying AWS configs, writing files. When something goes wrong, there's no undo. You're left manually tracking down what changed.
 
-## The Solution
+## What UndoMCP Does
 
-UndoMCP silently records every MCP tool call your agent makes. When you want to undo, just say **"undo"** to your AI agent. It shows you what changed, you pick what to reverse, and it handles the rest.
+UndoMCP records every MCP tool call your agent makes. When you invoke `/undomcp` (or say "undo", "revert", "rollback"), your agent shows you what changed and lets you selectively reverse it.
 
-- **Install once, forget forever** — one command, works automatically
-- **Works with any MCP server** — Notion, GitHub, Stripe, AWS, filesystem, anything
-- **Works across sessions** — close your IDE, reopen, history is still there
-- **Works across all IDEs** — Cursor, Claude Code, Windsurf, Codex, VS Code Copilot, and more
+Install once. Works automatically. Persists across sessions.
 
 ---
 
 ## Installation
 
-<!-- INSTALLATION_PLACEHOLDER -->
+<!-- INSTALLATION -->
 
 ```bash
-# Coming soon
+# Coming soon — see below for distribution options
 ```
 
 ---
 
 ## How It Works
 
+UndoMCP is a transparent proxy that sits between your AI agent and MCP servers:
+
 ```
-┌─────────────────────────────────┐
-│  Your IDE / AI Agent            │
-│  (Cursor, Claude Code, etc.)    │
-└───────────────┬─────────────────┘
-                │
-                ▼
-┌─────────────────────────────────┐
-│  UndoMCP (transparent proxy)    │
-│  • Logs every tool call         │
-│  • Adds "undo" tools            │
-│  • Zero latency overhead        │
-└───────────────┬─────────────────┘
-                │
-                ▼
-┌─────────────────────────────────┐
-│  Your MCP Server                │
-│  (Notion, GitHub, Stripe, etc.) │
-└─────────────────────────────────┘
+  Your AI Agent (Cursor, Claude Code, Windsurf, etc.)
+                    │
+                    ▼
+  ┌─────────────────────────────────┐
+  │         UndoMCP Proxy           │
+  │  • Records every tool call      │
+  │  • Adds undo capability         │
+  │  • Zero latency impact          │
+  └─────────────────────────────────┘
+                    │
+                    ▼
+  Your MCP Servers (Notion, Stripe, GitHub, etc.)
 ```
 
-**That's it.** UndoMCP sits between your agent and MCP servers as a thin proxy. It records what goes through, adds undo capability, and forwards everything transparently. Your MCP servers don't need any changes.
+**Setup rewrites your MCP configs** to route through UndoMCP. Your MCP servers don't need any changes. The proxy forwards everything transparently and keeps a local journal at `~/.undomcp/journal.db`.
 
-### What happens when you say "undo"
+**When you invoke undo**, the agent:
+1. Reads the journal (last 10 state-changing actions, filtered from reads)
+2. Shows you a numbered list
+3. You pick what to reverse
+4. The agent calls the inverse MCP tool (e.g., trashes a created page)
+5. Marks the action as undone in the journal
 
-1. You say **"undo"** (or "revert", "rollback") to your AI agent
-2. Agent shows you the last 10 state-changing actions (filters out reads automatically)
-3. You say **"undo #3"** or **"undo till #5"**
-4. Agent figures out the inverse (e.g., `create_page` → trash the page) and executes it
-5. Done. Change is reversed and marked in the journal.
+**Cross-session persistence** — history is tied to your project directory, not your session. Close the IDE, reopen, switch agents — the journal is still there.
 
-### Key design choices
-
-- **Logs everything, filters at display time** — nothing is ever missed
-- **AI-driven undo** — your agent reasons about the inverse, not brittle heuristics
-- **Dependency detection** — warns you if undoing #3 would break #1 and #2
-- **File snapshots** — for filesystem tools, captures file content before/after for perfect restores
+**Dependency detection** — if undoing action #5 would break action #2 that depends on it, you get a warning before proceeding.
 
 ---
 
-## Usage
+## Supported ADEs
 
-After installation, UndoMCP works automatically. Just talk to your AI agent:
+UndoMCP auto-detects and configures:
 
-```
-You: undo
-
-Agent: Here are your recent MCP changes:
-  3) notion__API-post-page - Created page "Meeting Notes"
-  2) notion__API-patch-page - Updated title to "Q3 Planning"  
-  1) github__create_issue - Created issue #42 "Fix login bug"
-
-Which change do you want to undo?
-
-You: undo till #2
-
-Agent: Will undo #1 and #2. Proceed? (yes/no)
-
-You: yes
-
-Agent: ✔ Undone #1 (deleted issue #42)
-       ✔ Undone #2 (reverted page title)
-```
-
-### Commands
-
-| Command | What it does |
-|---------|-------------|
-| `undo` | Show recent undoable changes |
-| `undo #N` | Undo just change #N |
-| `undo till #N` | Undo changes #1 through #N (inclusive) |
-
----
-
-## Supported IDEs
-
-UndoMCP auto-detects and configures all of these:
-
-| IDE / Agent | Status |
-|-------------|--------|
+| AI Development Environment | Status |
+|---------------------------|--------|
 | Cursor | ✅ |
 | Claude Code | ✅ |
 | Claude Desktop | ✅ |
@@ -138,58 +93,58 @@ UndoMCP auto-detects and configures all of these:
 | Amazon Q | ✅ |
 | Aider | ✅ |
 
----
-
-## How Setup Works
-
-When you run `undomcp setup`, it:
-
-1. **Detects** which IDEs you have installed
-2. **Wraps** their MCP server configs to route through the proxy
-3. **Installs** an AI skill file so your agent knows how to handle "undo"
-
-To remove: `undomcp uninstall` — perfectly restores everything to the original state.
+Works with **any MCP server** — no server-side changes needed.
 
 ---
 
-## FAQ
+## Usage
 
-**Does it slow down my agent?**  
-No. The proxy adds <1ms of overhead. It logs asynchronously and forwards immediately.
+After setup, invoke UndoMCP by telling your agent:
 
-**Does my MCP server need changes?**  
-No. UndoMCP works with any MCP server without modification.
+- `/undomcp`
+- "undo"
+- "revert"
+- "rollback"
 
-**Where is the data stored?**  
-`~/.undomcp/journal.db` — a local SQLite database. Nothing leaves your machine.
+The agent will call `undomcp_list_history`, filter to only state-changing actions, and present:
 
-**Does it work after restarting my IDE?**  
-Yes. History is tied to your project directory, not the session.
+```
+5) notion__API-post-page - Created page "Meeting Notes"
+4) notion__API-patch-page - Updated title to "Q3 Planning"
+3) stripe__create_customer - Created customer cus_abc123
+2) stripe__create_subscription - Created subscription for cus_abc123
+1) github__create_issue - Created issue #42 "Fix login bug"
+```
 
-**Can it undo everything?**  
-If an inverse MCP tool exists (e.g., `delete` for `create`), it undoes automatically. If not, it gives you step-by-step manual instructions.
+Then you say:
 
-**What about file changes?**  
-File modifications are captured as snapshots (before/after). Undo restores the exact previous content.
+| Command | Effect |
+|---------|--------|
+| `undo #3` | Undo only change #3 |
+| `undo till #3` | Undo #1, #2, and #3 (inclusive) |
 
-**How do I remove it?**  
+The agent handles the rest — figures out the inverse call, executes it, marks it done.
+
+---
+
+## Uninstall
+
 ```bash
 undomcp uninstall
 ```
-This restores all IDE configs, removes skill files, and deletes the journal database.
+
+Restores all MCP configs to their original state, removes skill files, and deletes the journal.
 
 ---
 
 ## Contributing
 
-Contributions welcome! The codebase is TypeScript, built with:
-
 ```bash
-npm run build     # Compile
+npm run build     # Compile TypeScript
 npm run test      # Run tests (vitest)
 ```
 
-See [AGENT.md](./AGENT.md) for full architecture documentation.
+See [AGENT.md](./AGENT.md) for architecture documentation.
 
 ---
 
