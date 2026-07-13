@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { DatabaseManager, Action } from '../src/journal/database-manager.js';
-import { UNDO_TOOLS, handleListHistory } from '../src/tools/undo-tools.js';
+import { UNDO_TOOLS, handleListHistory, handleSearchHistory } from '../src/tools/undo-tools.js';
 
 describe('Undo Tools', () => {
   let tempDir: string;
@@ -65,8 +65,8 @@ describe('Undo Tools', () => {
   }
 
   describe('UNDO_TOOLS', () => {
-    it('should define exactly 3 tools', () => {
-      expect(UNDO_TOOLS).toHaveLength(3);
+    it('should define exactly 4 tools', () => {
+      expect(UNDO_TOOLS).toHaveLength(4);
     });
 
     it('should contain undomcp_mark_turn', () => {
@@ -85,6 +85,12 @@ describe('Undo Tools', () => {
       const tool = UNDO_TOOLS.find(t => t.name === 'undomcp_undo_action');
       expect(tool).toBeDefined();
       expect(tool!.inputSchema.required).toContain('action_ids');
+    });
+
+    it('should contain undomcp_search_history', () => {
+      const tool = UNDO_TOOLS.find(t => t.name === 'undomcp_search_history');
+      expect(tool).toBeDefined();
+      expect(tool!.inputSchema.required).toContain('query');
     });
   });
 
@@ -220,6 +226,81 @@ describe('Undo Tools', () => {
       // 'true', 'ok', 'test' are too short/common to be IDs — no high-confidence deps
       const highDeps = toolB!.depends_on.filter(d => d.confidence === 'high');
       expect(highDeps).toHaveLength(0);
+    });
+  });
+
+  describe('handleSearchHistory', () => {
+    it('should return found: false when no actions match', () => {
+      createTestAction({
+        turnId: turnId1,
+        sequenceNum: 1,
+        toolName: 'stripe__create_customer',
+        parameters: { name: 'alice' },
+        resultSuccess: 1 as any,
+      });
+
+      const result = handleSearchHistory(dbManager, tempDir, 'notion document deletion');
+      expect(result.found).toBe(false);
+    });
+
+    it('should find matching action using keywords and concept synonyms', () => {
+      const act1 = createTestAction({
+        turnId: turnId1,
+        sequenceNum: 1,
+        toolName: 'sqlite__query',
+        parameters: { sql: 'DROP TABLE users;' },
+        metadata: { label: 'Execute command: DROP TABLE users' },
+        resultSuccess: 1 as any,
+      });
+
+      createTestAction({
+        turnId: turnId1,
+        sequenceNum: 2,
+        toolName: 'stripe__create_customer',
+        parameters: { email: 'test@example.com' },
+        resultSuccess: 1 as any,
+      });
+
+      const result = handleSearchHistory(dbManager, tempDir, 'deleting a table in database');
+      expect(result.found).toBe(true);
+      expect(result.matched_action).toBeDefined();
+      expect(result.matched_action!.id).toBe(act1.id);
+    });
+
+    it('should identify transitive dependents of the matched action', () => {
+      const act1 = createTestAction({
+        turnId: turnId1,
+        sequenceNum: 1,
+        toolName: 'notion__API-post-page',
+        parameters: { title: 'Design Doc' },
+        resultData: { id: 'page_12345678' },
+        resultSuccess: 1 as any,
+      });
+
+      const act2 = createTestAction({
+        turnId: turnId1,
+        sequenceNum: 2,
+        toolName: 'notion__API-patch-page',
+        parameters: { page_id: 'page_12345678', content: 'Updated design' },
+        resultSuccess: 1 as any,
+      });
+
+      const act3 = createTestAction({
+        turnId: turnId1,
+        sequenceNum: 3,
+        toolName: 'stripe__create_customer',
+        parameters: { email: 'other@example.com' },
+        resultSuccess: 1 as any,
+      });
+
+      const result = handleSearchHistory(dbManager, tempDir, 'create a notion document');
+      expect(result.found).toBe(true);
+      expect(result.matched_action!.id).toBe(act1.id);
+      
+      // Dependents should contain the page patch action, but not the stripe action
+      expect(result.dependents).toBeDefined();
+      expect(result.dependents!.some(d => d.id === act2.id)).toBe(true);
+      expect(result.dependents!.some(d => d.id === act3.id)).toBe(false);
     });
   });
 });
