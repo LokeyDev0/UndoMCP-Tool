@@ -227,8 +227,183 @@ export const UNDO_TOOLS = [
       },
       required: ['action_ids']
     }
+  },
+  {
+    name: 'undomcp_search_history',
+    description: 'Search the history of MCP tool calls for the current project using a natural language description (e.g., "deleting a table in a database" or "messing up Notion documents"). Returns the most relevant matching change, its details, and any dependent actions.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Natural language description of the change to search for'
+        }
+      },
+      required: ['query']
+    }
   }
 ];
+
+// --- Search Helpers & Synonyms ---
+
+const CONCEPT_SYNONYMS: Record<string, string[]> = {
+  'delet': ['delet', 'remov', 'drop', 'destroy', 'trash', 'unlink', 'clear', 'purg'],
+  'delete': ['delet', 'remov', 'drop', 'destroy', 'trash', 'unlink', 'clear', 'purg'],
+  'remove': ['delet', 'remov', 'drop', 'destroy', 'trash', 'unlink', 'clear', 'purg'],
+  'remov': ['delet', 'remov', 'drop', 'destroy', 'trash', 'unlink', 'clear', 'purg'],
+  'drop': ['delet', 'remov', 'drop', 'destroy', 'trash', 'unlink', 'clear', 'purg'],
+  'trash': ['delet', 'remov', 'drop', 'destroy', 'trash', 'unlink', 'clear', 'purg'],
+  
+  'databas': ['databas', 'db', 'sql', 'tabl', 'queri', 'sqlite', 'postgr', 'mysql', 'schema', 'relat'],
+  'database': ['databas', 'db', 'sql', 'tabl', 'queri', 'sqlite', 'postgr', 'mysql', 'schema', 'relat'],
+  'db': ['databas', 'db', 'sql', 'tabl', 'queri', 'sqlite', 'postgr', 'mysql', 'schema', 'relat'],
+  'table': ['databas', 'db', 'sql', 'tabl', 'queri', 'sqlite', 'postgr', 'mysql', 'schema', 'relat'],
+  'tabl': ['databas', 'db', 'sql', 'tabl', 'queri', 'sqlite', 'postgr', 'mysql', 'schema', 'relat'],
+  'sql': ['databas', 'db', 'sql', 'tabl', 'queri', 'sqlite', 'postgr', 'mysql', 'schema', 'relat'],
+  'query': ['databas', 'db', 'sql', 'tabl', 'queri', 'sqlite', 'postgr', 'mysql', 'schema', 'relat'],
+  'queri': ['databas', 'db', 'sql', 'tabl', 'queri', 'sqlite', 'postgr', 'mysql', 'schema', 'relat'],
+  
+  'creat': ['creat', 'add', 'mak', 'new', 'post', 'insert', 'writ', 'put'],
+  'create': ['creat', 'add', 'mak', 'new', 'post', 'insert', 'writ', 'put'],
+  'add': ['creat', 'add', 'mak', 'new', 'post', 'insert', 'writ', 'put'],
+  'make': ['creat', 'add', 'mak', 'new', 'post', 'insert', 'writ', 'put'],
+  'mak': ['creat', 'add', 'mak', 'new', 'post', 'insert', 'writ', 'put'],
+  'new': ['creat', 'add', 'mak', 'new', 'post', 'insert', 'writ', 'put'],
+  'insert': ['creat', 'add', 'mak', 'new', 'post', 'insert', 'writ', 'put'],
+  'write': ['creat', 'add', 'mak', 'new', 'post', 'insert', 'writ', 'put'],
+  'writ': ['creat', 'add', 'mak', 'new', 'post', 'insert', 'writ', 'put'],
+  
+  'edit': ['edit', 'modifi', 'updat', 'chang', 'patch', 'replac', 'set'],
+  'modify': ['edit', 'modifi', 'updat', 'chang', 'patch', 'replac', 'set'],
+  'modifi': ['edit', 'modifi', 'updat', 'chang', 'patch', 'replac', 'set'],
+  'update': ['edit', 'modifi', 'updat', 'chang', 'patch', 'replac', 'set'],
+  'updat': ['edit', 'modifi', 'updat', 'chang', 'patch', 'replac', 'set'],
+  'change': ['edit', 'modifi', 'updat', 'chang', 'patch', 'replac', 'set'],
+  'chang': ['edit', 'modifi', 'updat', 'chang', 'patch', 'replac', 'set'],
+  'patch': ['edit', 'modifi', 'updat', 'chang', 'patch', 'replac', 'set'],
+  'replace': ['edit', 'modifi', 'updat', 'chang', 'patch', 'replac', 'set'],
+  'replac': ['edit', 'modifi', 'updat', 'chang', 'patch', 'replac', 'set'],
+  
+  'file': ['file', 'code', 'path', 'dir', 'director', 'folder'],
+  'code': ['file', 'code', 'path', 'dir', 'director', 'folder'],
+  'path': ['file', 'code', 'path', 'dir', 'director', 'folder'],
+  
+  'notion': ['notion', 'page', 'block', 'databas', 'doc'],
+  'page': ['notion', 'page', 'block', 'databas', 'doc'],
+  'document': ['notion', 'page', 'block', 'databas', 'doc', 'file'],
+  'doc': ['notion', 'page', 'block', 'databas', 'doc']
+};
+
+function getCleanTokens(query: string): string[] {
+  const STOP_WORDS = new Set([
+    'a', 'an', 'the', 'in', 'on', 'at', 'for', 'to', 'of', 'with', 'by', 'and', 'or', 'is', 'are', 'was', 'were',
+    'be', 'been', 'about', 'as', 'it', 'this', 'that', 'they', 'them', 'their', 'my', 'your', 'his', 'her', 'us',
+    'we', 'i', 'you', 'he', 'she', 'me', 'him', 'up', 'down', 'out', 'off', 'over', 'under', 'again', 'further',
+    'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more',
+    'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very'
+  ]);
+  
+  const rawWords = query
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, ' ')
+    .split(/\s+/);
+    
+  const tokens: string[] = [];
+  for (const word of rawWords) {
+    if (!word || STOP_WORDS.has(word) || word.length < 2) continue;
+    
+    let stemmed = word;
+    if (word.endsWith('ing') && word.length > 5) stemmed = word.slice(0, -3);
+    else if (word.endsWith('ed') && word.length > 4) stemmed = word.slice(0, -2);
+    else if (word.endsWith('es') && word.length > 4) stemmed = word.slice(0, -2);
+    else if (word.endsWith('s') && !word.endsWith('ss') && word.length > 3) stemmed = word.slice(0, -1);
+    
+    if (stemmed.length >= 2) {
+      tokens.push(stemmed);
+    }
+  }
+  return tokens;
+}
+
+function calculateSearchScore(action: Action, cleanTokens: string[]): number {
+  let score = 0;
+  
+  const toolName = (action.toolName || '').toLowerCase();
+  const namespace = (action.namespace || '').toLowerCase();
+  const label = (action.metadata?.label || '').toLowerCase();
+  const parametersStr = action.parameters ? JSON.stringify(action.parameters).toLowerCase() : '';
+  const resultDataStr = action.resultData ? JSON.stringify(action.resultData).toLowerCase() : '';
+  
+  for (const token of cleanTokens) {
+    const synonyms = CONCEPT_SYNONYMS[token] || [token];
+    
+    // Check exact token first
+    let tokenMatched = false;
+    
+    if (toolName.includes(token) || namespace.includes(token)) {
+      score += 10;
+      tokenMatched = true;
+    }
+    if (label.includes(token)) {
+      score += 8;
+      tokenMatched = true;
+    }
+    if (parametersStr.includes(token)) {
+      score += 6;
+      tokenMatched = true;
+    }
+    if (resultDataStr.includes(token)) {
+      score += 4;
+      tokenMatched = true;
+    }
+    
+    // If exact token didn't match, try synonyms
+    if (!tokenMatched) {
+      for (const syn of synonyms) {
+        if (syn === token) continue;
+        
+        if (toolName.includes(syn) || namespace.includes(syn)) {
+          score += 4;
+          break; // only score one synonym per token
+        }
+        if (label.includes(syn)) {
+          score += 3;
+          break;
+        }
+        if (parametersStr.includes(syn)) {
+          score += 2;
+          break;
+        }
+        if (resultDataStr.includes(syn)) {
+          score += 1;
+          break;
+        }
+      }
+    }
+  }
+  
+  return score;
+}
+
+function findTransitiveDependents(targetId: string, actions: HistoryEntry[]): Set<string> {
+  const dependents = new Set<string>();
+  const queue = [targetId];
+
+  while (queue.length > 0) {
+    const currentId = queue.shift()!;
+    for (const action of actions) {
+      if (dependents.has(action.id)) continue;
+      
+      const isDependent = action.depends_on.some(d => d.action_id === currentId);
+      if (isDependent) {
+        dependents.add(action.id);
+        queue.push(action.id);
+      }
+    }
+  }
+
+  return dependents;
+}
 
 // --- Tool Handlers ---
 
@@ -257,4 +432,80 @@ export function handleListHistory(
   detectSameResourceDeps(entries);
 
   return entries;
+}
+
+export function handleSearchHistory(
+  dbManager: DatabaseManager,
+  workingDirectory: string,
+  query: string
+): {
+  found: boolean;
+  matched_action?: HistoryEntry;
+  dependents?: HistoryEntry[];
+  alternatives?: HistoryEntry[];
+} {
+  // Retrieve a generous number of recent executed actions for search and dependency mapping
+  const actions = dbManager.getRecentActionsForProject(workingDirectory, 1000);
+  if (actions.length === 0) {
+    return { found: false };
+  }
+
+  const cleanTokens = getCleanTokens(query);
+  if (cleanTokens.length === 0) {
+    return { found: false };
+  }
+
+  const scoredCandidates = actions.map(action => {
+    const score = calculateSearchScore(action, cleanTokens);
+    return { action, score };
+  });
+
+  const validCandidates = scoredCandidates
+    .filter(c => c.score > 0)
+    .sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+      return new Date(b.action.timestamp).getTime() - new Date(a.action.timestamp).getTime();
+    });
+
+  if (validCandidates.length === 0) {
+    return { found: false };
+  }
+
+  const bestMatch = validCandidates[0].action;
+
+  // Map all loaded actions to HistoryEntry format
+  const entries: HistoryEntry[] = actions.map(a => ({
+    id: a.id,
+    sessionId: a.sessionId,
+    timestamp: a.timestamp,
+    toolName: a.toolName,
+    namespace: a.namespace,
+    parameters: a.parameters,
+    success: a.resultSuccess === 1,
+    resultData: a.resultData,
+    state: a.state,
+    depends_on: [],
+  }));
+
+  // Run dependency detection on the entire list (oldest first)
+  detectDependencies(entries);
+  detectSameResourceDeps(entries);
+
+  const matchedEntry = entries.find(e => e.id === bestMatch.id)!;
+  const dependentIds = findTransitiveDependents(bestMatch.id, entries);
+  const dependents = entries.filter(e => dependentIds.has(e.id));
+
+  // Extract up to 3 alternative high scoring matches (excluding the best match)
+  const alternatives = validCandidates
+    .slice(1, 4)
+    .map(c => entries.find(e => e.id === c.action.id)!);
+
+  return {
+    found: true,
+    matched_action: matchedEntry,
+    dependents,
+    alternatives
+  };
 }

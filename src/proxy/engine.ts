@@ -8,7 +8,8 @@ import { nanoid } from 'nanoid';
 import { UpstreamManager } from './upstream-manager.js';
 import {
   UNDO_TOOLS,
-  handleListHistory
+  handleListHistory,
+  handleSearchHistory
 } from '../tools/undo-tools.js';
 import { SchemaCache } from '../undo/schema-cache.js';
 import { InverseResolver } from '../undo/inverse-resolver.js';
@@ -544,6 +545,13 @@ export class ProxyEngine {
           const workingDir = session?.workingDirectory || process.cwd();
           const list = handleListHistory(this.dbManager, workingDir, limit);
           result = { content: [{ type: 'text', text: JSON.stringify(list, null, 2) }] };
+
+        } else if (toolName === 'undomcp_search_history') {
+          const query = args.query || '';
+          const session = this.dbManager.getSession(this.sessionId);
+          const workingDir = session?.workingDirectory || process.cwd();
+          const searchResult = handleSearchHistory(this.dbManager, workingDir, query);
+          result = { content: [{ type: 'text', text: JSON.stringify(searchResult, null, 2) }] };
 
         } else if (toolName === 'undomcp_undo_action') {
           // Phase 5: Execute undo for specified action IDs

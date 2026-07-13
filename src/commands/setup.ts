@@ -619,14 +619,18 @@ This skill allows you to view and undo recent MCP tool calls made in this projec
 
 ## Instructions
 
-When the user invokes this skill (e.g., via /undomcp or by asking to undo/revert):
+When the user invokes this skill (e.g., via /undomcp, by asking to undo/revert, or by saying "search <description>"):
 
-**IMPORTANT — Do NOT improvise:** If the \\\`undomcp_list_history\\\` tool is not available,
-not found, or the call returns an error, tell the user:
-"The undomcp_list_history tool is not available or returned an error.
-Please ensure undomcp is properly configured by running \\\`undomcp setup\\\`."
-Do NOT attempt to query the database manually, write scripts, search for database
-files, or work around the problem in any way. Stop immediately and report the error.
+### Step 0 — Search History (If requested)
+If the user specifies a search query/description (e.g., "search deleting a table in a database") or asks to search:
+1. Call the \\\`undomcp_search_history\\\` tool with the query.
+2. If the tool returns \\\`found: false\\\`, tell the user: "Change not found." and stop.
+3. If the tool returns \\\`found: true\\\`:
+   a. Present the matched change in detail: its tool name, a clear description of what it did, its parameters, and result data.
+   b. Present any dependent actions that were found (if any), explaining why they depend on this action.
+   c. List any alternative matches returned by the tool (if any) as "Alternative Matches".
+   d. Ask the user: "Do you want to proceed with undoing this change? (undoing this change will also undo any dependent changes)"
+   e. If the user confirms to proceed, go to Step 3 using the matched action ID (and any dependent action IDs).
 
 ### Step 1 — Retrieve & Display Changes
 1. Call the \\\`undomcp_list_history\\\` tool. It returns a JSON array of ALL recent MCP
@@ -643,7 +647,8 @@ files, or work around the problem in any way. Stop immediately and report the er
      info, status, count (e.g., \\\`API-get-self\\\`, \\\`API-post-search\\\`,
      \\\`API-retrieve-a-page\\\`, \\\`API-get-block-children\\\`, \\\`API-query-data-source\\\`).
    Use your judgement to classify each tool based on its name and parameters.
-3. Number **only the filtered items**. **Numbering rules:**
+3. **Pre-calculate the total count (N):** Before outputting the list, count the total number of filtered items (N). You MUST state this count in your thinking block.
+4. Number **only the filtered items**. **Numbering rules:**
    - **#1 is always the most recent change** and appears at the **BOTTOM** of the list.
    - The **highest number** (oldest change) appears at the **TOP**.
    - Numbers **decrease** going down the list.
@@ -655,8 +660,8 @@ files, or work around the problem in any way. Stop immediately and report the er
    Write the one-line description yourself by analyzing the tool name, its input
    parameters, and its result data. Be specific and descriptive (e.g., "Created a
    new Notion page titled 'Meeting Notes'" not "Called a tool").
-4. If no reversible changes exist, tell the user: "No undoable changes found."
-5. Do NOT add headers, commentary, or extra text around the list. Only the numbered
+5. If no reversible changes exist, tell the user: "No undoable changes found."
+6. Do NOT add headers, commentary, or extra text around the list. Only the numbered
    entries.
 
 ### Step 2 — Ask the User
@@ -664,13 +669,14 @@ After presenting the list, ask:
 > "Which change do you want to undo?"
 > - Say **\\\`undo #N\\\`** to undo just that one specific change.
 > - Say **\\\`undo till #N\\\`** to undo changes #1 through #N (inclusive). Everything older than #N is kept.
+> - Say **\\\`search <description>\\\`** to search the project history for a specific past change.
 
 If the user references a change number that does not exist in the list, tell them
 the valid range. For example: "Valid range is #1 to #5. Please pick a number in
 that range."
 
 ### Step 3 — Build & Present Plan
-Based on the user's choice, build an undo plan:
+Based on the user's choice (or search confirmation), build an undo plan:
 
 **Determine which changes to undo:**
 - **\\\`undo #N\\\`**: Only change #N. However, you MUST check: do any of the other
@@ -743,7 +749,7 @@ alwaysApply: true
 ---
 
 # UndoMCP Rules
-When the user asks to "undo", "revert", "rollback", or "open undomcp":
+When the user asks to "undo", "revert", "rollback", "open undomcp", or search for a past change (e.g. "search <description>"):
 
 **IMPORTANT — Do NOT improvise:** If the \\\`undomcp_list_history\\\` tool is not available,
 not found, or the call returns an error, tell the user:
@@ -751,6 +757,17 @@ not found, or the call returns an error, tell the user:
 Please ensure undomcp is properly configured by running \\\`undomcp setup\\\`."
 Do NOT attempt to query the database manually, write scripts, search for database
 files, or work around the problem in any way. Stop immediately and report the error.
+
+### Step 0 — Search History (If requested)
+If the user specifies a search query/description (e.g., "search deleting a table in a database") or asks to search:
+1. Call the \\\`undomcp_search_history\\\` tool with the query.
+2. If the tool returns \\\`found: false\\\`, tell the user: "Change not found." and stop.
+3. If the tool returns \\\`found: true\\\`:
+   a. Present the matched change in detail: tool name, description of what it did, parameters, and result data.
+   b. Present any dependent actions that were found (if any), explaining why they depend on this action.
+   c. List any alternative matches returned by the tool (if any) as "Alternative Matches".
+   d. Ask the user: "Do you want to proceed with undoing this change? (undoing this change will also undo any dependent changes)"
+   e. If the user confirms to proceed, go to Step 3 using the matched action ID (and any dependent action IDs).
 
 ### Step 1 — Retrieve & Display Changes
 1. Call the \\\`undomcp_list_history\\\` tool. It returns a JSON array of ALL recent MCP
@@ -763,27 +780,29 @@ files, or work around the problem in any way. Stop immediately and report the er
      fetch, find, lookup, describe, check, view, show (e.g., \\\`API-get-self\\\`,
      \\\`API-post-search\\\`, \\\`API-retrieve-a-page\\\`).
    Use your judgement to classify each tool based on its name and parameters.
-3. Number **only the filtered items**. **Numbering rules:**
+3. **Pre-calculate the total count (N):** Before outputting the list, count the total number of filtered items (N). You MUST state this count in your thinking block.
+4. Number **only the filtered items**. **Numbering rules:**
    - **#1 is always the most recent change** and appears at the **BOTTOM**.
    - The **highest number** (oldest change) appears at the **TOP**.
    - Numbers **decrease** going down the list.
    Each line: \\\`N) namespace__tool_name - One sentence describing what this call did\\\`
    Write the description by analyzing the tool name, parameters, and result data.
-4. If no reversible changes exist, tell the user: "No undoable changes found."
-5. Do NOT add headers, commentary, or extra text around the list.
+5. If no reversible changes exist, tell the user: "No undoable changes found."
+6. Do NOT add headers, commentary, or extra text around the list.
 
 ### Step 2 — Ask the User
 After presenting the list, ask:
 > "Which change do you want to undo?"
 > - Say **\\\`undo #N\\\`** to undo just that one specific change.
 > - Say **\\\`undo till #N\\\`** to undo changes #1 through #N (inclusive). Everything older than #N is kept.
+> - Say **\\\`search <description>\\\`** to search the project history for a specific past change.
 
 If the user references a change number that does not exist in the list, tell them
 the valid range. For example: "Valid range is #1 to #5. Please pick a number in
 that range."
 
 ### Step 3 — Build & Present Plan
-Based on the user's choice, build an undo plan:
+Based on the user's choice (or search confirmation), build an undo plan:
 - **\\\`undo #N\\\`**: Only change #N. Check if any more recent changes depend on #N's
   output. If yes, warn the user and ask if they want to also undo those.
 - **\\\`undo till #N\\\`**: Changes #1, #2, #3, ... #N (inclusive). Everything numbered higher than #N is kept.
@@ -812,7 +831,7 @@ actual resource names and IDs from the original call data.
 `;
 
   const textRulesContent = `# UndoMCP Rules
-When the user asks to "undo", "revert", "rollback", or "open undomcp":
+When the user asks to "undo", "revert", "rollback", "open undomcp", or search for a past change (e.g. "search <description>"):
 
 **IMPORTANT — Do NOT improvise:** If the \\\`undomcp_list_history\\\` tool is not available,
 not found, or the call returns an error, tell the user:
@@ -820,6 +839,17 @@ not found, or the call returns an error, tell the user:
 Please ensure undomcp is properly configured by running \\\`undomcp setup\\\`."
 Do NOT attempt to query the database manually, write scripts, search for database
 files, or work around the problem in any way. Stop immediately and report the error.
+
+### Step 0 — Search History (If requested)
+If the user specifies a search query/description (e.g., "search deleting a table in a database") or asks to search:
+1. Call the \\\`undomcp_search_history\\\` tool with the query.
+2. If the tool returns \\\`found: false\\\`, tell the user: "Change not found." and stop.
+3. If the tool returns \\\`found: true\\\`:
+   a. Present the matched change in detail: tool name, description of what it did, parameters, and result data.
+   b. Present any dependent actions that were found (if any), explaining why they depend on this action.
+   c. List any alternative matches returned by the tool (if any) as "Alternative Matches".
+   d. Ask the user: "Do you want to proceed with undoing this change? (undoing this change will also undo any dependent changes)"
+   e. If the user confirms to proceed, go to Step 3 using the matched action ID (and any dependent action IDs).
 
 ### Step 1 — Retrieve & Display Changes
 1. Call the \\\`undomcp_list_history\\\` tool. It returns a JSON array of ALL recent MCP
@@ -831,27 +861,29 @@ files, or work around the problem in any way. Stop immediately and report the er
      fetch, find, lookup, describe, check, view, show (e.g., \\\`API-get-self\\\`,
      \\\`API-post-search\\\`, \\\`API-retrieve-a-page\\\`).
    Use your judgement to classify each tool based on its name and parameters.
-3. Number **only the filtered items**. **Numbering rules:**
+3. **Pre-calculate the total count (N):** Before outputting the list, count the total number of filtered items (N). You MUST state this count in your thinking block.
+4. Number **only the filtered items**. **Numbering rules:**
    - **#1 is always the most recent change** and appears at the **BOTTOM**.
    - The **highest number** (oldest change) appears at the **TOP**.
    - Numbers **decrease** going down the list.
    Each line: \\\`N) namespace__tool_name - One sentence describing what this call did\\\`
    Write the description by analyzing the tool name, parameters, and result data.
-4. If no reversible changes exist, tell the user: "No undoable changes found."
-5. Do NOT add headers, commentary, or extra text around the list.
+5. If no reversible changes exist, tell the user: "No undoable changes found."
+6. Do NOT add headers, commentary, or extra text around the list.
 
 ### Step 2 — Ask the User
 After presenting the list, ask:
 > "Which change do you want to undo?"
 > - Say **\\\`undo #N\\\`** to undo just that one specific change.
 > - Say **\\\`undo till #N\\\`** to undo changes #1 through #N (inclusive). Everything older than #N is kept.
+> - Say **\\\`search <description>\\\`** to search the project history for a specific past change.
 
 If the user references a change number that does not exist in the list, tell them
 the valid range. For example: "Valid range is #1 to #5. Please pick a number in
 that range."
 
 ### Step 3 — Build & Present Plan
-Based on the user's choice, build an undo plan:
+Based on the user's choice (or search confirmation), build an undo plan:
 - **\\\`undo #N\\\`**: Only change #N. Check if any more recent changes depend on #N's
   output. If yes, warn the user and ask if they want to also undo those.
 - **\\\`undo till #N\\\`**: Changes #1, #2, #3, ... #N (inclusive). Everything numbered higher than #N is kept.
