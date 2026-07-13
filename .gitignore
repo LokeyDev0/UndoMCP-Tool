@@ -13,9 +13,12 @@ dist/
 Thumbs.db
 Desktop.ini
 
+<<<<<<< HEAD
 # Legacy (old compiled-only reference modules, not part of the project)
 legacy/
 
+=======
+>>>>>>> fc53768cefd50a6da507d6a7fba613424d9f26b0
 # Logs
 *.log
 npm-debug.log*

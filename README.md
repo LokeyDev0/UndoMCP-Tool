@@ -16,7 +16,11 @@
 
 ## The Problem
 
+<<<<<<< HEAD
 > AI agents execute powerful actions through MCP—editing Notion pages, creating Stripe customers, modifying AWS configurations, or writing database schemas. But when an agent makes a mistake, **there is no Ctrl+Z.**
+=======
+> AI agents execute powerful actions through MCP—editing Notion pages, creating Stripe customers, modifying AWS configurations, or writing database schemas. But when an agent makes a critial mistake like , **there is no Ctrl+Z.**
+>>>>>>> fc53768cefd50a6da507d6a7fba613424d9f26b0
 
 Currently, you only have two flawed options:
 
@@ -26,9 +30,15 @@ Currently, you only have two flawed options:
 
 ## What UndoMCP Does
 
+<<<<<<< HEAD
 UndoMCP records every MCP tool call your agent makes inside of a small database. When you invoke `/undomcp`, your agent invokes a skill which looks into the database and shows you what changed and lets you selectively reverse it.
 
 This means you are not limited by the context window of the LLM and you can undo MCP changes across sessions. 
+=======
+UndoMCP records every MCP tool call your agent makes inside of a small database. When you invoke `/undomcp` , your agent invokes a skill witch looks into the database and shows you what changed and lets you selectively reverse it.
+
+This means the you are not limted by the context window of LLM and you can undo MCP changes across sessions. 
+>>>>>>> fc53768cefd50a6da507d6a7fba613424d9f26b0
 
 UndoMcp is a install and forget tool. Works automatically. Persists across sessions.
 
