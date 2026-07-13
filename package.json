@@ -1,0 +1,36 @@
+{
+  "name": "undomcp",
+  "version": "1.0.0",
+  "description": "Universal AI Agent Undo Tool via MCP Proxy",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "undomcp": "./dist/index.js"
+  },
+  "files": [
+    "dist/",
+    "install.sh",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "build:bin": "node build.js",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.6.0",
+    "better-sqlite3": "^11.0.0",
+    "commander": "^12.1.0",
+    "nanoid": "^5.0.7",
+    "yaml": "^2.4.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.10",
+    "@types/node": "^20.14.2",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  }
+}
