@@ -30,8 +30,7 @@ Currently, you only have two flawed options:
 
 UndoMCP records every MCP tool call your agent makes inside of a small database. When you invoke `/undomcp`, your agent invokes a skill which looks into the database and shows you what changed and lets you selectively reverse it.
 
-This means you are not limited by the context window of the LLM and you can undo MCP changes across sessions. 
-=======
+**This means you are not limited by the context window of the LLM and you can undo MCP changes across sessions.**
 
 UndoMcp is a install and forget tool. Works automatically. Persists across sessions.
 
