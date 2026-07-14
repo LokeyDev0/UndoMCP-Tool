@@ -117,7 +117,6 @@ UndoMCP auto-detects and configures:
 | Zed | ✅ |
 | JetBrains IDEs | ✅ |
 | Amazon Q | ✅ |
-| Aider | ✅ |
 
 Works with **any MCP server** — no server-side changes needed.
 

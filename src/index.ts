@@ -95,8 +95,9 @@ program
 // Uninstall subcommand
 program
   .command('uninstall')
-  .description('Completely remove undomcp: restore MCP configs, remove skills, delete journal database')
-  .option('--keep-db', 'Keep the journal database (only remove configs and skills)')
+  .description('Remove undomcp from your system (interactive: choose soft or full uninstall)')
+  .option('--keep-db', 'Soft uninstall: remove configs and skills but keep the journal database')
+  .option('--full', 'Full uninstall: wipe everything including the journal database')
   .action(async (options) => {
     const { runUninstall } = await import('./commands/uninstall.js');
     await runUninstall(options);

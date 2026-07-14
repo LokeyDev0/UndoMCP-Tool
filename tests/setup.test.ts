@@ -141,15 +141,27 @@ describe('setup command', () => {
   });
 
   it('should auto-initialize empty configs and register standalone undomcp, then remove it on restore', async () => {
-    // 1. Create a mock file that is empty JSON
+    // 1. Create mock config files for multiple IDEs to test skill installation
     const mockEmptyPath = path.join(tempDir, `empty-mcp-test-${Date.now()}-${Math.random().toString(36).substring(7)}.json`);
+    const mockClaudeTestPath = path.join(tempDir, `claude-test-${Date.now()}.json`);
+    const mockCursorTestPath = path.join(tempDir, `cursor-test-${Date.now()}.json`);
     fs.writeFileSync(mockEmptyPath, '{}', 'utf8');
+    fs.writeFileSync(mockClaudeTestPath, '{}', 'utf8');
+    fs.writeFileSync(mockCursorTestPath, '{}', 'utf8');
 
-    // 2. Configure override paths for a custom client
+    // 2. Configure override paths for multiple clients to test conditional skill installation
     setClientConfigsOverride([
       {
         name: 'OpenCode',
         paths: [mockEmptyPath]
+      },
+      {
+        name: 'Claude Code',
+        paths: [mockClaudeTestPath]
+      },
+      {
+        name: 'Cursor',
+        paths: [mockCursorTestPath]
       }
     ]);
 
@@ -164,7 +176,7 @@ describe('setup command', () => {
       expect(content.mcp.undomcp.command).toBe('/mock/bin/undomcp');
       expect(content.mcp.undomcp.args).toEqual(['serve', '--command', 'node', '--args', '-e', '""']);
 
-      // Verify skills were installed
+      // Verify skills were installed ONLY for detected IDEs
       const claudeSkillPath = path.join(tempDir, '.claude/skills/undomcp/SKILL.md');
       const geminiSkillPath = path.join(tempDir, '.gemini/config/skills/undomcp/SKILL.md');
       const windsurfGlobalRules = path.join(tempDir, '.codeium/windsurf/memories/global_rules.md');
@@ -173,13 +185,16 @@ describe('setup command', () => {
       const windsurfRules = path.join(tempDir, '.windsurfrules');
       const windsurfMdc = path.join(tempDir, '.windsurf/rules/undomcp.md');
 
+      // Claude Code and Cursor are detected — their skills SHOULD be installed
       expect(fs.existsSync(claudeSkillPath)).toBe(true);
-      expect(fs.existsSync(geminiSkillPath)).toBe(true);
-      expect(fs.existsSync(windsurfGlobalRules)).toBe(true);
       expect(fs.existsSync(cursorRules)).toBe(true);
       expect(fs.existsSync(cursorMdc)).toBe(true);
-      expect(fs.existsSync(windsurfRules)).toBe(true);
-      expect(fs.existsSync(windsurfMdc)).toBe(true);
+
+      // Windsurf and Gemini/Antigravity are NOT detected — their skills should NOT be installed
+      expect(fs.existsSync(geminiSkillPath)).toBe(false);
+      expect(fs.existsSync(windsurfGlobalRules)).toBe(false);
+      expect(fs.existsSync(windsurfRules)).toBe(false);
+      expect(fs.existsSync(windsurfMdc)).toBe(false);
 
       // Run restore
       await runSetup({ restore: true, binaryPath: '/mock/bin/undomcp' });
@@ -190,15 +205,13 @@ describe('setup command', () => {
 
       // Verify skills were removed
       expect(fs.existsSync(claudeSkillPath)).toBe(false);
-      expect(fs.existsSync(geminiSkillPath)).toBe(false);
-      expect(fs.existsSync(windsurfGlobalRules)).toBe(false);
       expect(fs.existsSync(cursorRules)).toBe(false);
       expect(fs.existsSync(cursorMdc)).toBe(false);
-      expect(fs.existsSync(windsurfRules)).toBe(false);
-      expect(fs.existsSync(windsurfMdc)).toBe(false);
     } finally {
-      if (fs.existsSync(mockEmptyPath)) fs.unlinkSync(mockEmptyPath);
-      if (fs.existsSync(mockEmptyPath + '.undomcp-backup')) fs.unlinkSync(mockEmptyPath + '.undomcp-backup');
+      for (const f of [mockEmptyPath, mockClaudeTestPath, mockCursorTestPath]) {
+        if (fs.existsSync(f)) fs.unlinkSync(f);
+        if (fs.existsSync(f + '.undomcp-backup')) fs.unlinkSync(f + '.undomcp-backup');
+      }
       // Restore the mock paths to Cursor/Claude Code so other tests aren't affected
       setClientConfigsOverride([
         { name: 'Cursor', paths: [mockCursorPath] },
@@ -206,4 +219,73 @@ describe('setup command', () => {
       ]);
     }
   });
+
+  it('should support Zed configuration format with command objects', async () => {
+    const mockZedPath = path.join(tempDir, `zed-test-${Date.now()}.json`);
+    const zedConfig = {
+      context_servers: {
+        "my-server": {
+          command: {
+            path: "npx",
+            args: ["-y", "sqlite"],
+            env: { KEY: "val" }
+          }
+        }
+      }
+    };
+    fs.writeFileSync(mockZedPath, JSON.stringify(zedConfig, null, 2), 'utf8');
+    setClientConfigsOverride([{ name: 'Zed', paths: [mockZedPath] }]);
+
+    try {
+      await runSetup({ binaryPath: '/mock/bin/undomcp', all: true });
+
+      const content = JSON.parse(fs.readFileSync(mockZedPath, 'utf8'));
+      expect(content.context_servers["my-server"].command.path).toBe('/mock/bin/undomcp');
+      expect(content.context_servers["my-server"].command.args[0]).toBe('serve');
+      expect(content.context_servers.undomcp.command.path).toBe('/mock/bin/undomcp');
+
+      await runSetup({ restore: true, binaryPath: '/mock/bin/undomcp' });
+
+      const restored = JSON.parse(fs.readFileSync(mockZedPath, 'utf8'));
+      expect(restored.context_servers["my-server"].command.path).toBe('npx');
+      expect(restored.context_servers.undomcp).toBeUndefined();
+    } finally {
+      if (fs.existsSync(mockZedPath)) fs.unlinkSync(mockZedPath);
+      if (fs.existsSync(mockZedPath + '.undomcp-backup')) fs.unlinkSync(mockZedPath + '.undomcp-backup');
+    }
+  });
+
+  it('should support Continue configuration format with arrays', async () => {
+    const mockContinuePath = path.join(tempDir, `continue-test-${Date.now()}.json`);
+    const continueConfig = {
+      mcpServers: [
+        {
+          name: "my-server",
+          command: "node",
+          args: ["index.js"]
+        }
+      ]
+    };
+    fs.writeFileSync(mockContinuePath, JSON.stringify(continueConfig, null, 2), 'utf8');
+    setClientConfigsOverride([{ name: 'Continue', paths: [mockContinuePath] }]);
+
+    try {
+      await runSetup({ binaryPath: '/mock/bin/undomcp', all: true });
+
+      const content = JSON.parse(fs.readFileSync(mockContinuePath, 'utf8'));
+      expect(content.mcpServers[0].command).toBe('/mock/bin/undomcp');
+      expect(content.mcpServers[1].name).toBe('undomcp');
+      expect(content.mcpServers[1].command).toBe('/mock/bin/undomcp');
+
+      await runSetup({ restore: true, binaryPath: '/mock/bin/undomcp' });
+
+      const restored = JSON.parse(fs.readFileSync(mockContinuePath, 'utf8'));
+      expect(restored.mcpServers).toHaveLength(1);
+      expect(restored.mcpServers[0].command).toBe('node');
+    } finally {
+      if (fs.existsSync(mockContinuePath)) fs.unlinkSync(mockContinuePath);
+      if (fs.existsSync(mockContinuePath + '.undomcp-backup')) fs.unlinkSync(mockContinuePath + '.undomcp-backup');
+    }
+  });
 });
+

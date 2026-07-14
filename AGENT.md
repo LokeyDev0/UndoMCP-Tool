@@ -204,7 +204,7 @@ AGENT.md                        # This file
 
 ## Supported IDEs (Auto-Detected by Setup)
 
-Cursor, Claude Code, Claude Desktop, Windsurf, Codex CLI, Antigravity (Gemini), VS Code Copilot, OpenCode, Kilo Code, Cline, Roo Code, Continue, Zed, JetBrains IDEs, Amazon Q, Aider
+Cursor, Claude Code, Claude Desktop, Windsurf, Codex CLI, Antigravity (Gemini), VS Code Copilot, OpenCode, Kilo Code, Cline, Roo Code, Continue, Zed, JetBrains IDEs, Amazon Q
 
 ---
 

@@ -158,13 +158,6 @@ export function getClientConfigs(): ClientConfig[] {
         path.join(home, '.aws/amazonq/mcp.json'),
         path.join(appData, 'amazon-q/mcp.json')
       ]
-    },
-    {
-      name: 'Aider',
-      paths: [
-        path.join(home, '.aider/mcp.json'),
-        path.join(configDir, 'aider/mcp.json')
-      ]
     }
   ];
 }
@@ -445,6 +438,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
 
   // --- Determine which config files to process ---
   let targetPaths: Set<string>;
+  let selectedIdeNames: Set<string> = new Set();
 
   if (options.restore) {
     // Restore mode: process ALL config files that exist (no selection needed)
@@ -459,6 +453,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
   } else if (options.selectedClients) {
     // Programmatic mode: use pre-supplied selection
     targetPaths = new Set(options.selectedClients.map((c) => c.foundPath));
+    selectedIdeNames = new Set(options.selectedClients.map((c) => c.name));
   } else if (options.all) {
     // Non-interactive --all flag: configure every detected IDE
     const detected = detectInstalledClients();
@@ -467,6 +462,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
       return;
     }
     targetPaths = new Set(detected.map((c) => c.foundPath));
+    selectedIdeNames = new Set(detected.map((c) => c.name));
     console.log(`[undomcp] Found ${detected.length} AI agent(s): ${detected.map((c) => c.name).join(', ')}`);
   } else {
     // Interactive mode: detect and let user select
@@ -492,6 +488,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
     }
 
     targetPaths = new Set(selected.map((c) => c.foundPath));
+    selectedIdeNames = new Set(selected.map((c) => c.name));
   }
 
   // --- Process each config file ---
@@ -536,17 +533,35 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
               const testParsed = JSON.parse(JSON.stringify(parsed));
               const testServers = testParsed[serversKey];
               if (testServers && typeof testServers === 'object') {
-                for (const name of Object.keys(testServers)) {
-                  if (name === 'undomcp') {
-                    delete testServers.undomcp;
-                    continue;
+                const isTestArray = Array.isArray(testServers);
+                
+                // First remove undomcp standalone server
+                if (isTestArray) {
+                  const idx = testServers.findIndex((s: any) => s && s.name === 'undomcp');
+                  if (idx !== -1) {
+                    testServers.splice(idx, 1);
                   }
-                  const srv = testServers[name];
+                } else {
+                  if (testServers.undomcp) {
+                    delete testServers.undomcp;
+                  }
+                }
+
+                // Then restore each remaining server
+                for (const key of Object.keys(testServers)) {
+                  const srv = testServers[key];
+                  if (!srv || typeof srv !== 'object') continue;
+                  
                   if (srv.__originalCommand) {
-                    srv.command = srv.__originalCommand;
-                    srv.args = srv.__originalArgs || [];
-                    delete srv.__originalCommand;
-                    delete srv.__originalArgs;
+                    if (typeof srv.__originalCommand === 'object' && srv.__originalCommand !== null) {
+                      srv.command = srv.__originalCommand;
+                      delete srv.__originalCommand;
+                    } else {
+                      srv.command = srv.__originalCommand;
+                      srv.args = srv.__originalArgs || [];
+                      delete srv.__originalCommand;
+                      delete srv.__originalArgs;
+                    }
                   }
                 }
               }
@@ -573,9 +588,11 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
           }
         }
 
+        const isArray = Array.isArray(servers) || (config.name === 'Continue' && !servers);
+
         if (!servers || typeof servers !== 'object') {
           if (!options.restore) {
-            parsed[serversKey] = {};
+            parsed[serversKey] = isArray ? [] : {};
             servers = parsed[serversKey];
             fileChanged = true;
           } else {
@@ -590,27 +607,56 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
           }
         }
 
-        for (const name of Object.keys(servers)) {
-          if (name === 'undomcp') continue;
+        // Helper to check matching undomcp server configuration
+        const isUndomcpServer = (srv: any): boolean => {
+          if (!srv || typeof srv !== 'object') return false;
+          const cmd = typeof srv.command === 'object' && srv.command !== null ? srv.command.path : srv.command;
+          const args = typeof srv.command === 'object' && srv.command !== null ? srv.command.args : srv.args;
+          
+          return typeof cmd === 'string' && (
+            cmd === undomcpBin ||
+            (cmd && (cmd.endsWith('node') || cmd.endsWith('node.exe')) && Array.isArray(args) && args.includes(undomcpBin)) ||
+            cmd.endsWith('undomcp') ||
+            cmd.endsWith('undomcp.exe')
+          );
+        };
 
-          const srv = servers[name];
+        const serverKeys = Object.keys(servers);
+        for (const key of serverKeys) {
+          const srv = (servers as any)[key];
+          if (!srv || typeof srv !== 'object') continue;
+
+          const srvName = isArray ? srv.name : key;
+          if (srvName === 'undomcp') continue;
+
           if (options.restore) {
             // Restore original server config if it was wrapped
             if (srv.__originalCommand) {
-              srv.command = srv.__originalCommand;
-              srv.args = srv.__originalArgs || [];
-              delete srv.__originalCommand;
-              delete srv.__originalArgs;
+              if (typeof srv.__originalCommand === 'object' && srv.__originalCommand !== null) {
+                srv.command = srv.__originalCommand;
+                delete srv.__originalCommand;
+              } else {
+                srv.command = srv.__originalCommand;
+                srv.args = srv.__originalArgs || [];
+                delete srv.__originalCommand;
+                delete srv.__originalArgs;
+              }
               fileChanged = true;
             }
           } else {
             // Wrap server if not already wrapped
-            const isWrapped = srv.command === undomcpBin ||
-                              (typeof srv.command === 'string' && srv.command.endsWith('undomcp')) ||
-                              (typeof srv.command === 'string' && srv.command.endsWith('undomcp.exe')) ||
-                              (srv.command && (srv.command.endsWith('node') || srv.command.endsWith('node.exe')) && Array.isArray(srv.args) && srv.args.includes(undomcpBin));
+            const isCommandObject = typeof srv.command === 'object' && srv.command !== null;
+            const cmdPath = isCommandObject ? srv.command.path : srv.command;
+            const cmdArgs = isCommandObject ? srv.command.args : srv.args;
 
-            if (!isWrapped && srv.command) {
+            const isWrapped = typeof cmdPath === 'string' && (
+              cmdPath === undomcpBin ||
+              cmdPath.endsWith('undomcp') ||
+              cmdPath.endsWith('undomcp.exe') ||
+              ((cmdPath.endsWith('node') || cmdPath.endsWith('node.exe')) && Array.isArray(cmdArgs) && cmdArgs.includes(undomcpBin))
+            );
+
+            if (!isWrapped && typeof cmdPath === 'string') {
               // Create backup before first modification
               if (!fileChanged) {
                 const backupPath = backupConfigFile(configPath);
@@ -619,16 +665,27 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
                 }
               }
 
-              srv.__originalCommand = srv.command;
-              srv.__originalArgs = srv.args || [];
-
-              const runWithNode = undomcpBin.endsWith('.js') || undomcpBin.endsWith('.ts');
-              if (runWithNode) {
-                srv.command = process.execPath;
-                srv.args = [undomcpBin, 'serve', '--command', srv.__originalCommand, '--args', ...(srv.__originalArgs || [])];
+              if (isCommandObject) {
+                srv.__originalCommand = JSON.parse(JSON.stringify(srv.command));
+                const runWithNode = undomcpBin.endsWith('.js') || undomcpBin.endsWith('.ts');
+                if (runWithNode) {
+                  srv.command.path = process.execPath;
+                  srv.command.args = [undomcpBin, 'serve', '--command', srv.__originalCommand.path, '--args', ...(srv.__originalCommand.args || [])];
+                } else {
+                  srv.command.path = undomcpBin;
+                  srv.command.args = ['serve', '--command', srv.__originalCommand.path, '--args', ...(srv.__originalArgs || [])];
+                }
               } else {
-                srv.command = undomcpBin;
-                srv.args = ['serve', '--command', srv.__originalCommand, '--args', ...(srv.__originalArgs || [])];
+                srv.__originalCommand = srv.command;
+                srv.__originalArgs = srv.args || [];
+                const runWithNode = undomcpBin.endsWith('.js') || undomcpBin.endsWith('.ts');
+                if (runWithNode) {
+                  srv.command = process.execPath;
+                  srv.args = [undomcpBin, 'serve', '--command', srv.__originalCommand, '--args', ...(srv.__originalArgs || [])];
+                } else {
+                  srv.command = undomcpBin;
+                  srv.args = ['serve', '--command', srv.__originalCommand, '--args', ...(srv.__originalArgs || [])];
+                }
               }
               fileChanged = true;
             }
@@ -636,8 +693,37 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
         }
 
         // Handle standalone undomcp registration
+        const isZed = config.name === 'Zed';
+        const createUndomcpConfig = () => {
+          const runWithNode = undomcpBin.endsWith('.js') || undomcpBin.endsWith('.ts');
+          const cmd = runWithNode ? process.execPath : undomcpBin;
+          const args = runWithNode
+            ? [undomcpBin, 'serve', '--command', 'node', '--args', '-e', '""']
+            : ['serve', '--command', 'node', '--args', '-e', '""'];
+
+          if (isZed) {
+            return {
+              command: {
+                path: cmd,
+                args: args
+              }
+            };
+          } else {
+            return {
+              command: cmd,
+              args: args
+            };
+          }
+        };
+
         if (!options.restore) {
-          const hasUndomcp = !!servers.undomcp;
+          let hasUndomcp = false;
+          if (isArray) {
+            hasUndomcp = servers.some((srv: any) => srv && srv.name === 'undomcp');
+          } else {
+            hasUndomcp = !!servers.undomcp;
+          }
+
           if (!hasUndomcp) {
             if (!fileChanged) {
               const backupPath = backupConfigFile(configPath);
@@ -645,28 +731,28 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
                 console.log(`[undomcp] Backup created: ${shortenPath(backupPath)}`);
               }
             }
-            const runWithNode = undomcpBin.endsWith('.js') || undomcpBin.endsWith('.ts');
-            if (runWithNode) {
-              servers.undomcp = {
-                command: process.execPath,
-                args: [undomcpBin, 'serve', '--command', 'node', '--args', '-e', '""']
-              };
+
+            const undomcpSrv = createUndomcpConfig();
+            if (isArray) {
+              servers.push({
+                name: 'undomcp',
+                ...undomcpSrv
+              });
             } else {
-              servers.undomcp = {
-                command: undomcpBin,
-                args: ['serve', '--command', 'node', '--args', '-e', '""']
-              };
+              servers.undomcp = undomcpSrv;
             }
             fileChanged = true;
           }
         } else {
           // Restore mode: remove undomcp standalone server only if it matches our added version
-          if (servers.undomcp) {
-            const matchesCommand = servers.undomcp.command === undomcpBin || 
-                                   (servers.undomcp.command && (servers.undomcp.command.endsWith('node') || servers.undomcp.command.endsWith('node.exe')) && Array.isArray(servers.undomcp.args) && servers.undomcp.args.includes(undomcpBin)) ||
-                                   (typeof servers.undomcp.command === 'string' && servers.undomcp.command.endsWith('undomcp')) ||
-                                   (typeof servers.undomcp.command === 'string' && servers.undomcp.command.endsWith('undomcp.exe'));
-            if (matchesCommand) {
+          if (isArray) {
+            const index = servers.findIndex((srv: any) => srv && srv.name === 'undomcp' && isUndomcpServer(srv));
+            if (index !== -1) {
+              servers.splice(index, 1);
+              fileChanged = true;
+            }
+          } else {
+            if (servers.undomcp && isUndomcpServer(servers.undomcp)) {
               delete servers.undomcp;
               fileChanged = true;
             }
@@ -685,7 +771,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
   }
 
   if (!options.restore) {
-    installAdapterSkills();
+    installAdapterSkills(selectedIdeNames);
     if (modifiedCount === 0) {
       console.log('[undomcp] No configuration files were updated (already configured).');
     } else {
@@ -712,9 +798,12 @@ function getWorkspaceDir(): string {
   return process.cwd();
 }
 
-function installAdapterSkills(): void {
+function installAdapterSkills(selectedIdeNames: Set<string>): void {
   const home = getSkillsHomeDir();
   const cwd = getWorkspaceDir();
+
+  // Helper: check if an IDE name (or any of several names) is in the selected set
+  const hasIde = (...names: string[]) => names.some((n) => selectedIdeNames.has(n));
 
   const skillContent = `---
 name: undomcp
@@ -1020,64 +1109,75 @@ actual resource names and IDs from the original call data.
 `;
 
   // 1. Claude Code Global Skill
-  const claudeSkillsDir = path.join(home, '.claude/skills/undomcp');
-  try {
-    fs.mkdirSync(claudeSkillsDir, { recursive: true });
-    fs.writeFileSync(path.join(claudeSkillsDir, 'SKILL.md'), skillContent, 'utf8');
-    console.log(`[undomcp] Installed Claude Code global skill at: ${shortenPath(path.join(claudeSkillsDir, 'SKILL.md'))}`);
-  } catch (err: any) {
-    console.error(`[undomcp] Failed to install Claude Code skill: ${err.message}`);
+  if (hasIde('Claude Code')) {
+    const claudeSkillsDir = path.join(home, '.claude/skills/undomcp');
+    try {
+      fs.mkdirSync(claudeSkillsDir, { recursive: true });
+      fs.writeFileSync(path.join(claudeSkillsDir, 'SKILL.md'), skillContent, 'utf8');
+      console.log(`[undomcp] Installed Claude Code global skill at: ${shortenPath(path.join(claudeSkillsDir, 'SKILL.md'))}`);
+    } catch (err: any) {
+      console.error(`[undomcp] Failed to install Claude Code skill: ${err.message}`);
+    }
   }
 
   // 2. Gemini / Antigravity Global Skill
-  const geminiSkillsDir = path.join(home, '.gemini/config/skills/undomcp');
-  try {
-    fs.mkdirSync(geminiSkillsDir, { recursive: true });
-    fs.writeFileSync(path.join(geminiSkillsDir, 'SKILL.md'), skillContent, 'utf8');
-    console.log(`[undomcp] Installed Gemini/Antigravity global skill at: ${shortenPath(path.join(geminiSkillsDir, 'SKILL.md'))}`);
-  } catch (err: any) {
-    console.error(`[undomcp] Failed to install Gemini skill: ${err.message}`);
+  if (hasIde('Antigravity (Gemini)')) {
+    const geminiSkillsDir = path.join(home, '.gemini/config/skills/undomcp');
+    try {
+      fs.mkdirSync(geminiSkillsDir, { recursive: true });
+      fs.writeFileSync(path.join(geminiSkillsDir, 'SKILL.md'), skillContent, 'utf8');
+      console.log(`[undomcp] Installed Gemini/Antigravity global skill at: ${shortenPath(path.join(geminiSkillsDir, 'SKILL.md'))}`);
+    } catch (err: any) {
+      console.error(`[undomcp] Failed to install Gemini skill: ${err.message}`);
+    }
   }
 
   // 3. Windsurf Global Rules
-  const windsurfMemoriesDir = path.join(home, '.codeium/windsurf/memories');
-  try {
-    fs.mkdirSync(windsurfMemoriesDir, { recursive: true });
-    fs.writeFileSync(path.join(windsurfMemoriesDir, 'global_rules.md'), textRulesContent, 'utf8');
-    console.log(`[undomcp] Installed Windsurf global rules at: ${shortenPath(path.join(windsurfMemoriesDir, 'global_rules.md'))}`);
-  } catch (err: any) {
-    console.error(`[undomcp] Failed to install Windsurf global rules: ${err.message}`);
+  if (hasIde('Windsurf')) {
+    const windsurfMemoriesDir = path.join(home, '.codeium/windsurf/memories');
+    try {
+      fs.mkdirSync(windsurfMemoriesDir, { recursive: true });
+      fs.writeFileSync(path.join(windsurfMemoriesDir, 'global_rules.md'), textRulesContent, 'utf8');
+      console.log(`[undomcp] Installed Windsurf global rules at: ${shortenPath(path.join(windsurfMemoriesDir, 'global_rules.md'))}`);
+    } catch (err: any) {
+      console.error(`[undomcp] Failed to install Windsurf global rules: ${err.message}`);
+    }
   }
 
-  // 4. Local Workspace rules (Cursor & Windsurf)
-  const cursorRulesDir = path.join(cwd, '.cursor/rules');
-  const windsurfRulesDir = path.join(cwd, '.windsurf/rules');
+  // 4. Local Workspace rules (Cursor & Windsurf) — only if the ADE is detected
+  if (hasIde('Cursor')) {
+    const cursorRulesDir = path.join(cwd, '.cursor/rules');
 
-  // Write to .cursorrules at root
-  try {
-    fs.writeFileSync(path.join(cwd, '.cursorrules'), textRulesContent, 'utf8');
-    console.log(`[undomcp] Installed local .cursorrules in current workspace`);
-  } catch {}
+    // Write to .cursorrules at root
+    try {
+      fs.writeFileSync(path.join(cwd, '.cursorrules'), textRulesContent, 'utf8');
+      console.log(`[undomcp] Installed local .cursorrules in current workspace`);
+    } catch {}
 
-  // Write to .cursor/rules/undomcp.mdc
-  try {
-    fs.mkdirSync(cursorRulesDir, { recursive: true });
-    fs.writeFileSync(path.join(cursorRulesDir, 'undomcp.mdc'), mdcContent, 'utf8');
-    console.log(`[undomcp] Installed local .cursor/rules/undomcp.mdc in current workspace`);
-  } catch {}
+    // Write to .cursor/rules/undomcp.mdc
+    try {
+      fs.mkdirSync(cursorRulesDir, { recursive: true });
+      fs.writeFileSync(path.join(cursorRulesDir, 'undomcp.mdc'), mdcContent, 'utf8');
+      console.log(`[undomcp] Installed local .cursor/rules/undomcp.mdc in current workspace`);
+    } catch {}
+  }
 
-  // Write to .windsurfrules at root
-  try {
-    fs.writeFileSync(path.join(cwd, '.windsurfrules'), textRulesContent, 'utf8');
-    console.log(`[undomcp] Installed local .windsurfrules in current workspace`);
-  } catch {}
+  if (hasIde('Windsurf')) {
+    const windsurfRulesDir = path.join(cwd, '.windsurf/rules');
 
-  // Write to .windsurf/rules/undomcp.md
-  try {
-    fs.mkdirSync(windsurfRulesDir, { recursive: true });
-    fs.writeFileSync(path.join(windsurfRulesDir, 'undomcp.md'), textRulesContent, 'utf8');
-    console.log(`[undomcp] Installed local .windsurf/rules/undomcp.md in current workspace`);
-  } catch {}
+    // Write to .windsurfrules at root
+    try {
+      fs.writeFileSync(path.join(cwd, '.windsurfrules'), textRulesContent, 'utf8');
+      console.log(`[undomcp] Installed local .windsurfrules in current workspace`);
+    } catch {}
+
+    // Write to .windsurf/rules/undomcp.md
+    try {
+      fs.mkdirSync(windsurfRulesDir, { recursive: true });
+      fs.writeFileSync(path.join(windsurfRulesDir, 'undomcp.md'), textRulesContent, 'utf8');
+      console.log(`[undomcp] Installed local .windsurf/rules/undomcp.md in current workspace`);
+    } catch {}
+  }
 }
 
 function removeAdapterSkills(): void {
