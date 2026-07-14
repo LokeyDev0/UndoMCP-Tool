@@ -3,6 +3,25 @@ import * as path from 'path';
 import * as os from 'os';
 import * as readline from 'readline';
 
+export function parseJsonc(content: string): any {
+  // Strip comments (both single line and multi-line)
+  const clean = content.replace(/\\"|"(?:\\"|[^"])*"|(\/\/.*|\/\*[\s\S]*?\*\/)/g, (m, g) => g ? "" : m);
+  return JSON.parse(clean);
+}
+
+function deepEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (typeof a !== 'object' || a === null || typeof b !== 'object' || b === null) return false;
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  for (const key of keysA) {
+    if (!keysB.includes(key)) return false;
+    if (!deepEqual(a[key], b[key])) return false;
+  }
+  return true;
+}
+
 export interface ClientConfig {
   name: string;
   paths: string[];
@@ -373,8 +392,9 @@ export interface SetupOptions {
 async function resolveUndomcpBinary(explicitPath?: string): Promise<string> {
   if (explicitPath) return explicitPath;
 
-  // Try to find 'undomcp' in PATH
   const { execSync } = await import('child_process');
+
+  // 1. Try to find 'undomcp' in PATH
   try {
     const whichCmd = process.platform === 'win32' ? 'where undomcp' : 'which undomcp';
     const found = execSync(whichCmd, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim().split('\n')[0];
@@ -385,10 +405,28 @@ async function resolveUndomcpBinary(explicitPath?: string): Promise<string> {
     // Not in PATH
   }
 
-  // Check if we're running as a compiled binary (not via node)
+  // 2. Try global npm prefix
+  try {
+    const prefix = execSync('npm prefix -g', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const globalPath = process.platform === 'win32'
+      ? path.join(prefix, 'undomcp.cmd')
+      : path.join(prefix, 'bin/undomcp');
+    if (fs.existsSync(globalPath)) {
+      return globalPath;
+    }
+  } catch {
+    // ignore prefix resolution failures
+  }
+
+  // 3. Check if we're running as a compiled binary (not via node)
   const isCompiled = !process.argv[1] || !process.argv[1].endsWith('.js');
   if (isCompiled && !process.argv[0].endsWith('node') && !process.argv[0].endsWith('node.exe')) {
     return process.argv[0];
+  }
+
+  // 4. If we are running via node and the script path exists, return that script path
+  if (process.argv[1] && fs.existsSync(process.argv[1])) {
+    return path.resolve(process.argv[1]);
   }
 
   // Last resort: assume 'undomcp' will be in PATH
@@ -472,7 +510,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
         const content = fs.readFileSync(configPath, 'utf8');
         let parsed: any;
         try {
-          parsed = JSON.parse(content);
+          parsed = parseJsonc(content);
         } catch {
           // File might be empty or invalid JSON, skip it
           continue;
@@ -485,6 +523,55 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
         const serversKey = getServersKeyForConfig(config.name, configPath, parsed);
         let servers = parsed[serversKey];
         let fileChanged = false;
+
+        // Restore mode: try clean backup restore first if possible
+        if (options.restore) {
+          const backupPath = configPath + '.undomcp-backup';
+          if (fs.existsSync(backupPath)) {
+            try {
+              const backupContent = fs.readFileSync(backupPath, 'utf8');
+              const backupParsed = parseJsonc(backupContent);
+              
+              // Apply in-memory restoration to see if it results in the original backup state
+              const testParsed = JSON.parse(JSON.stringify(parsed));
+              const testServers = testParsed[serversKey];
+              if (testServers && typeof testServers === 'object') {
+                for (const name of Object.keys(testServers)) {
+                  if (name === 'undomcp') {
+                    delete testServers.undomcp;
+                    continue;
+                  }
+                  const srv = testServers[name];
+                  if (srv.__originalCommand) {
+                    srv.command = srv.__originalCommand;
+                    srv.args = srv.__originalArgs || [];
+                    delete srv.__originalCommand;
+                    delete srv.__originalArgs;
+                  }
+                }
+              }
+              if (serversKey === 'github.copilot.chat.mcp.servers') {
+                if (backupParsed['github.copilot.chat.mcp.enabled'] !== undefined) {
+                  testParsed['github.copilot.chat.mcp.enabled'] = backupParsed['github.copilot.chat.mcp.enabled'];
+                } else {
+                  delete testParsed['github.copilot.chat.mcp.enabled'];
+                }
+              }
+
+              // If the in-memory restoration equals the original backup config, we restore the backup file directly.
+              // This fully preserves comments, spacing, and formatting.
+              if (deepEqual(testParsed, backupParsed)) {
+                fs.copyFileSync(backupPath, configPath);
+                fs.unlinkSync(backupPath);
+                console.log(`[undomcp] Restored original config with comments from backup for ${config.name}`);
+                modifiedCount++;
+                continue;
+              }
+            } catch (err: any) {
+              // fall back to default JSON serialization restore
+            }
+          }
+        }
 
         if (!servers || typeof servers !== 'object') {
           if (!options.restore) {
@@ -520,7 +607,8 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
             // Wrap server if not already wrapped
             const isWrapped = srv.command === undomcpBin ||
                               (typeof srv.command === 'string' && srv.command.endsWith('undomcp')) ||
-                              (typeof srv.command === 'string' && srv.command.endsWith('undomcp.exe'));
+                              (typeof srv.command === 'string' && srv.command.endsWith('undomcp.exe')) ||
+                              (srv.command && (srv.command.endsWith('node') || srv.command.endsWith('node.exe')) && Array.isArray(srv.args) && srv.args.includes(undomcpBin));
 
             if (!isWrapped && srv.command) {
               // Create backup before first modification
@@ -534,8 +622,14 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
               srv.__originalCommand = srv.command;
               srv.__originalArgs = srv.args || [];
 
-              srv.command = undomcpBin;
-              srv.args = ['serve', '--command', srv.__originalCommand, '--args', ...(srv.__originalArgs || [])];
+              const runWithNode = undomcpBin.endsWith('.js') || undomcpBin.endsWith('.ts');
+              if (runWithNode) {
+                srv.command = process.execPath;
+                srv.args = [undomcpBin, 'serve', '--command', srv.__originalCommand, '--args', ...(srv.__originalArgs || [])];
+              } else {
+                srv.command = undomcpBin;
+                srv.args = ['serve', '--command', srv.__originalCommand, '--args', ...(srv.__originalArgs || [])];
+              }
               fileChanged = true;
             }
           }
@@ -551,17 +645,31 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
                 console.log(`[undomcp] Backup created: ${shortenPath(backupPath)}`);
               }
             }
-            servers.undomcp = {
-              command: undomcpBin,
-              args: ['serve', '--command', 'node', '--args', '-e', '""']
-            };
+            const runWithNode = undomcpBin.endsWith('.js') || undomcpBin.endsWith('.ts');
+            if (runWithNode) {
+              servers.undomcp = {
+                command: process.execPath,
+                args: [undomcpBin, 'serve', '--command', 'node', '--args', '-e', '""']
+              };
+            } else {
+              servers.undomcp = {
+                command: undomcpBin,
+                args: ['serve', '--command', 'node', '--args', '-e', '""']
+              };
+            }
             fileChanged = true;
           }
         } else {
           // Restore mode: remove undomcp standalone server only if it matches our added version
-          if (servers.undomcp && Array.isArray(servers.undomcp.args) && servers.undomcp.args.includes('-e')) {
-            delete servers.undomcp;
-            fileChanged = true;
+          if (servers.undomcp) {
+            const matchesCommand = servers.undomcp.command === undomcpBin || 
+                                   (servers.undomcp.command && (servers.undomcp.command.endsWith('node') || servers.undomcp.command.endsWith('node.exe')) && Array.isArray(servers.undomcp.args) && servers.undomcp.args.includes(undomcpBin)) ||
+                                   (typeof servers.undomcp.command === 'string' && servers.undomcp.command.endsWith('undomcp')) ||
+                                   (typeof servers.undomcp.command === 'string' && servers.undomcp.command.endsWith('undomcp.exe'));
+            if (matchesCommand) {
+              delete servers.undomcp;
+              fileChanged = true;
+            }
           }
         }
 
