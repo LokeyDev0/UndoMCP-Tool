@@ -203,6 +203,16 @@ export async function selectIdesInteractively(
     let selectAll = true;
     let lastRenderedLines = 0;
 
+    function stripAnsi(s: string): string {
+      return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    }
+
+    function visualRows(line: string, columns: number): number {
+      const visible = stripAnsi(line).length;
+      if (visible === 0) return 1;
+      return Math.ceil(visible / columns);
+    }
+
     function moveCursorUp(lines: number) {
       if (lines > 0) {
         process.stdout.write(`\x1b[${lines}A`);
@@ -217,7 +227,6 @@ export async function selectIdesInteractively(
       }
 
       const lines: string[] = [];
-      lines.push('');
       lines.push('\x1b[1m\x1b[36m╔══════════════════════════════════════════════════╗\x1b[0m');
       lines.push('\x1b[1m\x1b[36m║     UndoMCP — IDE Configuration Setup           ║\x1b[0m');
       lines.push('\x1b[1m\x1b[36m╚══════════════════════════════════════════════════╝\x1b[0m');
@@ -251,7 +260,8 @@ export async function selectIdesInteractively(
 
       const output = lines.join('\n') + '\n';
       process.stdout.write(output);
-      lastRenderedLines = output.split('\n').length - 1;
+      const cols = process.stdout.columns || 80;
+      lastRenderedLines = lines.reduce((sum, line) => sum + visualRows(line, cols), 0);
     }
 
     function updateSelectAll() {

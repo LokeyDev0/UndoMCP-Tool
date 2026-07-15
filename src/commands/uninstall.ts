@@ -33,6 +33,16 @@ async function selectUninstallMode(): Promise<UninstallMode | null> {
     let cursorIndex = 0;
     let lastRenderedLines = 0;
 
+    function stripAnsi(s: string): string {
+      return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    }
+
+    function visualRows(line: string, columns: number): number {
+      const visible = stripAnsi(line).length;
+      if (visible === 0) return 1;
+      return Math.ceil(visible / columns);
+    }
+
     function moveCursorUp(lines: number) {
       if (lines > 0) {
         process.stdout.write(`\x1b[${lines}A`);
@@ -72,7 +82,9 @@ async function selectUninstallMode(): Promise<UninstallMode | null> {
 
       const output = lines.join('\n') + '\n';
       process.stdout.write(output);
-      lastRenderedLines = lines.length;
+
+      const cols = process.stdout.columns || 80;
+      lastRenderedLines = lines.reduce((sum, line) => sum + visualRows(line, cols), 0);
     }
 
     const onKeypress = (_str: string, key: any) => {
