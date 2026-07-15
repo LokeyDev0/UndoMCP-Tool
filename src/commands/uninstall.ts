@@ -46,7 +46,6 @@ async function selectUninstallMode(): Promise<UninstallMode | null> {
       }
 
       const lines: string[] = [];
-      lines.push('');
       lines.push('\x1b[1m\x1b[36m╔══════════════════════════════════════════════════╗\x1b[0m');
       lines.push('\x1b[1m\x1b[36m║          UndoMCP — Uninstall Options             ║\x1b[0m');
       lines.push('\x1b[1m\x1b[36m╚══════════════════════════════════════════════════╝\x1b[0m');
@@ -73,7 +72,7 @@ async function selectUninstallMode(): Promise<UninstallMode | null> {
 
       const output = lines.join('\n') + '\n';
       process.stdout.write(output);
-      lastRenderedLines = output.split('\n').length - 1;
+      lastRenderedLines = lines.length;
     }
 
     const onKeypress = (_str: string, key: any) => {
