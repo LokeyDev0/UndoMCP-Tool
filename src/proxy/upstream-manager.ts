@@ -16,9 +16,13 @@ export interface UpstreamDefinition {
 export interface UpstreamInstance {
   namespace: string;
   definition: UpstreamDefinition;
-  process: ChildProcess;
-  reader: readline.Interface;
+  process: ChildProcess | null;
+  reader: readline.Interface | null;
   pendingRequests: Map<string | number, (response: any) => void>;
+  exitCode?: number | null;
+  signal?: string | null;
+  stderrBuffer?: string[];
+  spawnError?: Error;
 }
 
 export class UpstreamManager {
@@ -79,9 +83,13 @@ export class UpstreamManager {
     this.upstreams.set(namespace, {
       namespace,
       definition,
-      process: null as any,
-      reader: null as any,
-      pendingRequests: new Map()
+      process: null,
+      reader: null,
+      pendingRequests: new Map(),
+      exitCode: null,
+      signal: null,
+      stderrBuffer: [],
+      spawnError: undefined
     });
   }
 
@@ -99,50 +107,71 @@ export class UpstreamManager {
       const cmd = isWin ? (process.env.COMSPEC || 'cmd.exe') : def.command;
       const args = isWin ? ['/d', '/s', '/c', def.command, ...def.args] : def.args;
 
+      inst.exitCode = null;
+      inst.signal = null;
+      inst.stderrBuffer = [];
+      inst.spawnError = undefined;
+
       const proc = spawn(cmd, args, {
         env: combinedEnv,
         stdio: ['pipe', 'pipe', 'pipe']
       });
 
       proc.on('error', (err) => {
+        inst.spawnError = err;
         if (!this.isStopping) {
           agentStderr.write(`[undomcp] Upstream process [${ns}] failed to start: ${err.message}\n`);
         }
       });
 
-      proc.stderr?.on('data', (data) => {
-        agentStderr.write(`[${ns}] ${data}`);
+      proc.on('exit', (code, signal) => {
+        inst.exitCode = code;
+        inst.signal = signal;
       });
 
-      const reader = readline.createInterface({
-        input: proc.stdout!,
-        output: undefined,
-        historySize: 0
+      proc.stderr?.on('data', (data) => {
+        const str = data.toString();
+        agentStderr.write(`[${ns}] ${str}`);
+        if (!inst.stderrBuffer) {
+          inst.stderrBuffer = [];
+        }
+        inst.stderrBuffer.push(str);
+        if (inst.stderrBuffer.length > 20) {
+          inst.stderrBuffer.shift();
+        }
       });
 
       inst.process = proc;
-      inst.reader = reader;
 
-      reader.on('line', (line) => {
-        if (!line.trim()) return;
-        try {
-          const parsed = JSON.parse(line);
-          const isResponse = parsed && parsed.id !== undefined && (parsed.result !== undefined || parsed.error !== undefined);
-          if (isResponse) {
-            const resolver = inst.pendingRequests.get(parsed.id);
-            if (resolver) {
-              inst.pendingRequests.delete(parsed.id);
-              resolver(parsed);
-              return;
+      if (proc.stdout) {
+        const reader = readline.createInterface({
+          input: proc.stdout,
+          output: undefined,
+          historySize: 0
+        });
+        inst.reader = reader;
+
+        reader.on('line', (line) => {
+          if (!line.trim()) return;
+          try {
+            const parsed = JSON.parse(line);
+            const isResponse = parsed && parsed.id !== undefined && (parsed.result !== undefined || parsed.error !== undefined);
+            if (isResponse) {
+              const resolver = inst.pendingRequests.get(parsed.id);
+              if (resolver) {
+                inst.pendingRequests.delete(parsed.id);
+                resolver(parsed);
+                return;
+              }
             }
+            if (this.onMessage) {
+              this.onMessage(ns, parsed);
+            }
+          } catch {
+            // Ignore parse errors on raw lines
           }
-          if (this.onMessage) {
-            this.onMessage(ns, parsed);
-          }
-        } catch {
-          // Ignore parse errors on raw lines
-        }
-      });
+        });
+      }
     }
   }
 
@@ -153,7 +182,9 @@ export class UpstreamManager {
     this.isStopping = true;
     for (const inst of this.upstreams.values()) {
       try {
-        inst.reader.close();
+        if (inst.reader) {
+          inst.reader.close();
+        }
       } catch {}
       if (inst.process) {
         inst.process.kill('SIGTERM');
@@ -166,23 +197,19 @@ export class UpstreamManager {
    */
   public async listAllTools(): Promise<any[]> {
     const promises = Array.from(this.upstreams.entries()).map(async ([ns, inst]) => {
-      try {
-        const response = await this.callUpstreamDirect(ns, 'tools/list', {});
-        if (response && response.result && Array.isArray(response.result.tools)) {
-          const tools = response.result.tools;
-          // Apply namespace double underscore mapping if there is more than 1 upstream or not default
-          if (this.upstreams.size > 1 || ns !== 'default') {
-            return tools.map((t: any) => ({
-              ...t,
-              name: `${ns}__${t.name}`
-            }));
-          }
-          return tools;
+      const response = await this.callUpstreamDirect(ns, 'tools/list', {});
+      if (response && response.result && Array.isArray(response.result.tools)) {
+        const tools = response.result.tools;
+        // Apply namespace double underscore mapping if there is more than 1 upstream or not default
+        if (this.upstreams.size > 1 || ns !== 'default') {
+          return tools.map((t: any) => ({
+            ...t,
+            name: `${ns}__${t.name}`
+          }));
         }
-      } catch (err: any) {
-        console.error(`[undomcp] Failed listing tools for namespace [${ns}]: ${err.message}`);
+        return tools;
       }
-      return [];
+      throw new Error(`Upstream [${ns}] returned invalid tools response`);
     });
 
     const results = await Promise.all(promises);
@@ -194,8 +221,22 @@ export class UpstreamManager {
    */
   public async callUpstreamDirect(namespace: string, method: string, params: any, customId?: string | number, timeoutMs?: number): Promise<any> {
     const inst = this.upstreams.get(namespace);
-    if (!inst || !inst.process) {
-      throw new Error(`Upstream namespace "${namespace}" is not running or defined.`);
+    if (!inst) {
+      throw new Error(`Upstream namespace "${namespace}" is not defined.`);
+    }
+
+    if (inst.spawnError) {
+      throw new Error(`Upstream [${namespace}] failed to start: ${inst.spawnError.message}`);
+    }
+
+    if (inst.exitCode !== null && inst.exitCode !== undefined) {
+      const lastStderr = inst.stderrBuffer?.join('').trim() || '';
+      const stderrMsg = lastStderr ? `\nStderr output:\n${lastStderr}` : '';
+      throw new Error(`Upstream [${namespace}] exited with code ${inst.exitCode}${inst.signal ? ` (signal ${inst.signal})` : ''}.${stderrMsg}`);
+    }
+
+    if (!inst.process) {
+      throw new Error(`Upstream namespace "${namespace}" is not running.`);
     }
 
     const effectiveTimeout = timeoutMs ?? 60000; // Default 60s timeout
@@ -220,12 +261,20 @@ export class UpstreamManager {
         params
       };
 
-      if (inst.process.stdin && !inst.process.stdin.destroyed) {
+      if (inst.process && inst.process.stdin && !inst.process.stdin.destroyed) {
         inst.process.stdin.write(JSON.stringify(request) + '\n');
       } else {
         clearTimeout(timer);
         inst.pendingRequests.delete(id);
-        reject(new Error(`Upstream process [${namespace}] stdin is closed.`));
+        
+        // Re-check exit code in case it died right now
+        if (inst.exitCode !== null && inst.exitCode !== undefined) {
+          const lastStderr = inst.stderrBuffer?.join('').trim() || '';
+          const stderrMsg = lastStderr ? `\nStderr output:\n${lastStderr}` : '';
+          reject(new Error(`Upstream [${namespace}] exited with code ${inst.exitCode}${inst.signal ? ` (signal ${inst.signal})` : ''}.${stderrMsg}`));
+        } else {
+          reject(new Error(`Upstream process [${namespace}] stdin is closed.`));
+        }
       }
     });
   }

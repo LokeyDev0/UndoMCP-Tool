@@ -223,7 +223,10 @@ export class ProxyEngine {
     } catch {
       // If not valid JSON, forward it to default upstream
       const defNs = this.upstreamManager.getNamespaces()[0] || 'default';
-      this.upstreamManager.getUpstreamInstance(defNs)?.process.stdin?.write(line + '\n');
+      const inst = this.upstreamManager.getUpstreamInstance(defNs);
+      if (inst && inst.process && inst.process.stdin) {
+        inst.process.stdin.write(line + '\n');
+      }
       return;
     }
 
