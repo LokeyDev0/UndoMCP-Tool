@@ -400,7 +400,7 @@ async function resolveUndomcpBinary(explicitPath?: string): Promise<string> {
   // 1. Try to find 'undomcp' in PATH
   try {
     const whichCmd = process.platform === 'win32' ? 'where undomcp' : 'which undomcp';
-    const found = execSync(whichCmd, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim().split('\n')[0];
+    const found = execSync(whichCmd, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim().split('\n')[0].replace(/\r/g, '');
     if (found && !found.endsWith('node') && !found.endsWith('node.exe')) {
       return found;
     }
@@ -410,7 +410,7 @@ async function resolveUndomcpBinary(explicitPath?: string): Promise<string> {
 
   // 2. Try global npm prefix
   try {
-    const prefix = execSync('npm prefix -g', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const prefix = execSync('npm prefix -g', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim().replace(/\r/g, '');
     const globalPath = process.platform === 'win32'
       ? path.join(prefix, 'undomcp.cmd')
       : path.join(prefix, 'bin/undomcp');
