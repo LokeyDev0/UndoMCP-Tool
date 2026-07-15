@@ -122,6 +122,7 @@ The original command/args are preserved in `__originalCommand` / `__originalArgs
 - **`undo till #N`** — Undo changes #1, #2, #3, ... #N (**inclusive**). Keep everything numbered higher than #N.
 - Undo executes in **reverse chronological order** (most recent first): #1, then #2, then #3...
 - The AI agent reasons about the inverse and calls the appropriate MCP tool directly
+- **Crucially**, when calling the inverse tool, the AI passes a special argument `{"__is_undo": true}`. The Proxy intercepts this, skips logging the action (to prevent undo calls from cluttering the history), strips the argument, and forwards the clean call upstream. This detection mechanism can be used later to build a "redo" feature.
 - After executing the inverse, the agent calls `undomcp_undo_action` to mark the action as undone
 - For file changes, `undomcp_undo_action` handles snapshot restoration automatically
 - If no viable inverse exists, the agent provides manual instructions

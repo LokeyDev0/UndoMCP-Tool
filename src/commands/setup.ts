@@ -845,30 +845,32 @@ If the user specifies a search query/description (e.g., "search deleting a table
    The array is ordered oldest-first (index 0 = oldest, last index = newest).
    Each entry includes a \\\`depends_on\\\` array showing structural dependencies
    between actions (shared resource IDs, confidence levels).
+
+   **CRITICAL RULE:** If there is any problem reading the history (e.g., the output is too large, unparseable, or you feel the need to write a script to process it), **DO NOT write or run any scripts**. Instead, immediately stop and give the user a clear error message explaining why (e.g., "The history is too large to process directly").
 2. **Filter the results:** Only show actions that are **state-changing and reversible**.
    - **INCLUDE** (mutating): tools that create, update, patch, delete, move, post
      (e.g., \\\`API-post-page\\\`, \\\`API-patch-page\\\`, \\\`API-delete-a-block\\\`,
      \\\`createDocument\\\`, \\\`updateRecord\\\`).
    - **EXCLUDE** (read-only): tools that only read/fetch data like get, retrieve,
      list, search, query, read, fetch, find, lookup, describe, check, view, show,
-     info, status, count (e.g., \\\`API-get-self\\\`, \\\`API-post-search\\\`,
-     \\\`API-retrieve-a-page\\\`, \\\`API-get-block-children\\\`, \\\`API-query-data-source\\\`).
-   Use your judgement to classify each tool based on its name and parameters.
-3. **Pre-calculate the total count (N):** Before outputting the list, count the total number of filtered items (N). You MUST state this count in your thinking block.
-4. Number **only the filtered items**. **Numbering rules:**
-   - **#1 is always the most recent change** and appears at the **BOTTOM** of the list.
-   - The **highest number** (oldest change) appears at the **TOP**.
-   - Numbers **decrease** going down the list.
-   - Example with 3 items: display as 3, 2, 1 from top to bottom.
+     info, status, count.
+   3. **Limit the list**: If there are more than 10 filtered state-changing items, keep only the **10 most recent** ones. Discard the older ones.
+4. **Pre-calculate the total count (N):** Count the total number of items in your final filtered and limited list. Let this be N (where N is at most 10). You MUST state this count in your thinking block.
+5. Number **only the final items**. **Numbering rules:**
+   - **#1 is always the most recent change** and appears at the **BOTTOM**.
+   - The **highest number (N)** (oldest change) appears at the **TOP**.
+   - Numbers **decrease** strictly by 1 going down the list (e.g. N, N-1, ... 1).
+   - If N=3, display as 3, 2, 1 from top to bottom.
+   - If N=10, display as 10, 9, 8 ... 1 from top to bottom.
    Each line MUST follow this exact format:
    \\\`\\\`\\\`
-   N) namespace__tool_name - One sentence describing what this call did
+   - [#N] namespace__tool_name - One sentence describing what this call did
    \\\`\\\`\\\`
    Write the one-line description yourself by analyzing the tool name, its input
    parameters, and its result data. Be specific and descriptive (e.g., "Created a
    new Notion page titled 'Meeting Notes'" not "Called a tool").
-5. If no reversible changes exist, tell the user: "No undoable changes found."
-6. Do NOT add headers, commentary, or extra text around the list. Only the numbered
+6. If no reversible changes exist, tell the user: "No undoable changes found."
+7. Do NOT add headers, commentary, or extra text around the list. Only the numbered
    entries.
 
 ### Step 2 — Ask the User
@@ -925,7 +927,7 @@ After the user approves, execute each undo **in reverse chronological order**
 
 1. **For each auto-reversible action:**
    a. Call the inverse MCP tool directly yourself (e.g., call \\\`API-patch-page\\\`
-      with \\\`{ "page_id": "...", "in_trash": true }\\\`). You have access to all MCP
+      with \\\`{ "page_id": "...", "in_trash": true, "__is_undo": true }\\\`). **IMPORTANT:** You MUST include \\\`"__is_undo": true\\\` in the tool arguments so the proxy knows not to log it. You have access to all MCP
       tools — use them.
    b. After the inverse call succeeds, call \\\`undomcp_undo_action\\\` with that
       action's ID to mark it as undone in the journal.
@@ -981,21 +983,24 @@ If the user specifies a search query/description (e.g., "search deleting a table
    tool calls made in this project (across all sessions, even after IDE restarts).
    The array is ordered oldest-first (index 0 = oldest, last index = newest).
    Each entry includes a \\\`depends_on\\\` array showing structural dependencies.
+
+   **CRITICAL RULE:** If there is any problem reading the history (e.g., the output is too large, unparseable, or you feel the need to write a script to process it), **DO NOT write or run any scripts**. Instead, immediately stop and give the user a clear error message explaining why (e.g., "The history is too large to process directly").
 2. **Filter the results:** Only show actions that are **state-changing and reversible**.
    - **INCLUDE** (mutating): tools that create, update, patch, delete, move, post.
    - **EXCLUDE** (read-only): tools that get, retrieve, list, search, query, read,
      fetch, find, lookup, describe, check, view, show (e.g., \\\`API-get-self\\\`,
      \\\`API-post-search\\\`, \\\`API-retrieve-a-page\\\`).
    Use your judgement to classify each tool based on its name and parameters.
-3. **Pre-calculate the total count (N):** Before outputting the list, count the total number of filtered items (N). You MUST state this count in your thinking block.
-4. Number **only the filtered items**. **Numbering rules:**
+3. **Limit the list**: If there are more than 10 filtered state-changing items, keep only the **10 most recent** ones. Discard the older ones.
+4. **Pre-calculate the total count (N):** Count the total number of items in your final filtered and limited list. Let this be N (where N is at most 10). You MUST state this count in your thinking block.
+5. Number **only the final items**. **Numbering rules:**
    - **#1 is always the most recent change** and appears at the **BOTTOM**.
-   - The **highest number** (oldest change) appears at the **TOP**.
-   - Numbers **decrease** going down the list.
-   Each line: \\\`N) namespace__tool_name - One sentence describing what this call did\\\`
+   - The **highest number (N)** (oldest change) appears at the **TOP**.
+   - Numbers **decrease** strictly by 1 going down the list.
+   Each line: \\\`- [#N] namespace__tool_name - One sentence describing what this call did\\\`
    Write the description by analyzing the tool name, parameters, and result data.
-5. If no reversible changes exist, tell the user: "No undoable changes found."
-6. Do NOT add headers, commentary, or extra text around the list.
+6. If no reversible changes exist, tell the user: "No undoable changes found."
+7. Do NOT add headers, commentary, or extra text around the list.
 
 ### Step 2 — Ask the User
 After presenting the list, ask:
@@ -1025,7 +1030,7 @@ confirm before executing.
 
 ### Step 4 — Execute Undo
 After approval, execute in reverse chronological order:
-1. **Auto-reversible**: Call the inverse MCP tool directly yourself, then call
+1. **Auto-reversible**: Call the inverse MCP tool directly yourself, **AND** you MUST pass \\\`"__is_undo": true\\\` in the tool arguments so the proxy knows not to log it. Then call
    \\\`undomcp_undo_action\\\` to mark it as undone in the journal.
 2. **File-change actions**: Call \\\`undomcp_undo_action\\\` (handles snapshot restore).
 3. **Manual-only**: Call \\\`undomcp_undo_action\\\` to mark as acknowledged, provide
@@ -1062,21 +1067,24 @@ If the user specifies a search query/description (e.g., "search deleting a table
 1. Call the \\\`undomcp_list_history\\\` tool. It returns a JSON array of ALL recent MCP
    tool calls made in this project (across all sessions, even after IDE restarts).
    The array is ordered oldest-first (index 0 = oldest, last index = newest).
+
+   **CRITICAL RULE:** If there is any problem reading the history (e.g., the output is too large, unparseable, or you feel the need to write a script to process it), **DO NOT write or run any scripts**. Instead, immediately stop and give the user a clear error message explaining why (e.g., "The history is too large to process directly").
 2. **Filter the results:** Only show actions that are **state-changing and reversible**.
    - **INCLUDE** (mutating): tools that create, update, patch, delete, move, post.
    - **EXCLUDE** (read-only): tools that get, retrieve, list, search, query, read,
      fetch, find, lookup, describe, check, view, show (e.g., \\\`API-get-self\\\`,
      \\\`API-post-search\\\`, \\\`API-retrieve-a-page\\\`).
    Use your judgement to classify each tool based on its name and parameters.
-3. **Pre-calculate the total count (N):** Before outputting the list, count the total number of filtered items (N). You MUST state this count in your thinking block.
-4. Number **only the filtered items**. **Numbering rules:**
+3. **Limit the list**: If there are more than 10 filtered state-changing items, keep only the **10 most recent** ones. Discard the older ones.
+4. **Pre-calculate the total count (N):** Count the total number of items in your final filtered and limited list. Let this be N (where N is at most 10). You MUST state this count in your thinking block.
+5. Number **only the final items**. **Numbering rules:**
    - **#1 is always the most recent change** and appears at the **BOTTOM**.
-   - The **highest number** (oldest change) appears at the **TOP**.
-   - Numbers **decrease** going down the list.
-   Each line: \\\`N) namespace__tool_name - One sentence describing what this call did\\\`
+   - The **highest number (N)** (oldest change) appears at the **TOP**.
+   - Numbers **decrease** strictly by 1 going down the list.
+   Each line: \\\`- [#N] namespace__tool_name - One sentence describing what this call did\\\`
    Write the description by analyzing the tool name, parameters, and result data.
-5. If no reversible changes exist, tell the user: "No undoable changes found."
-6. Do NOT add headers, commentary, or extra text around the list.
+6. If no reversible changes exist, tell the user: "No undoable changes found."
+7. Do NOT add headers, commentary, or extra text around the list.
 
 ### Step 2 — Ask the User
 After presenting the list, ask:
@@ -1106,7 +1114,7 @@ confirm before executing.
 
 ### Step 4 — Execute Undo
 After approval, execute in reverse chronological order:
-1. **Auto-reversible**: Call the inverse MCP tool directly yourself, then call
+1. **Auto-reversible**: Call the inverse MCP tool directly yourself, **AND** you MUST pass \`"__is_undo": true\` in the tool arguments so the proxy knows not to log it. Then call
    \`undomcp_undo_action\` to mark it as undone in the journal.
 2. **File-change actions**: Call \`undomcp_undo_action\` (handles snapshot restore).
 3. **Manual-only**: Call \`undomcp_undo_action\` to mark as acknowledged, provide

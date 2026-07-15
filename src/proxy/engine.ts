@@ -231,6 +231,8 @@ export class ProxyEngine {
     }
 
     const isRequest = parsed && parsed.id !== undefined && parsed.method !== undefined;
+    const isResponse = parsed && parsed.id !== undefined && parsed.method === undefined && (parsed.result !== undefined || parsed.error !== undefined);
+    const isNotification = parsed && parsed.id === undefined && parsed.method !== undefined;
     
     if (isRequest) {
       if (parsed.method === 'tools/list') {
@@ -311,7 +313,16 @@ export class ProxyEngine {
         const namespace = parts.length > 1 ? parts[0] : undefined;
         const baseToolName = parts.length > 1 ? parts[1] : toolName;
 
-        if (this.dbManager && this.sessionId) {
+        // Detect if this is an undo action based on a special parameter
+        const parsedArgs = parsed.params?.arguments || {};
+        const isUndoAction = parsedArgs.__is_undo === true;
+        
+        if (isUndoAction) {
+          // Remove the marker so it doesn't fail upstream validation
+          delete parsedArgs.__is_undo;
+        }
+
+        if (this.dbManager && this.sessionId && !isUndoAction) {
           try {
             // Turn clustering
             this.ensureActiveTurnId();
@@ -463,32 +474,28 @@ export class ProxyEngine {
         }
       }
 
-      // For 'initialize': respond immediately so the IDE doesn't timeout,
-      // then initialize upstreams in the background.
+      // For 'initialize': broadcast to upstreams, combine capabilities, and return the combined response
       if (parsed.method === 'initialize') {
-        // Send our own initialize response right away
-        const immediateResponse = {
-          jsonrpc: '2.0',
-          id: parsed.id,
-          result: {
-            protocolVersion: parsed.params?.protocolVersion || '2024-11-05',
-            capabilities: { tools: {} },
-            serverInfo: {
-              name: 'undomcp-proxy',
-              version: '1.0.0'
+        try {
+          const response = await this.upstreamManager.broadcast('initialize', parsed.params, parsed.id);
+          this.forwardToAgent(JSON.stringify(response), agentStdout);
+        } catch (err: any) {
+          console.error(`[undomcp] Upstream initialization failed: ${err.message}`);
+          // Fallback if upstreams fail to initialize
+          const fallbackResponse = {
+            jsonrpc: '2.0',
+            id: parsed.id,
+            result: {
+              protocolVersion: parsed.params?.protocolVersion || '2024-11-05',
+              capabilities: { tools: {} },
+              serverInfo: {
+                name: 'undomcp-proxy-fallback',
+                version: '1.0.0'
+              }
             }
-          }
-        };
-        this.forwardToAgent(JSON.stringify(immediateResponse), agentStdout);
-
-        // Initialize upstreams in background (non-blocking)
-        this.upstreamManager.broadcast('initialize', parsed.params, `bg_init_${nanoid()}`)
-          .then(() => {
-            // Upstreams ready — tools/list will work when called later
-          })
-          .catch((err: any) => {
-            console.error(`[undomcp] Background upstream initialization failed: ${err.message}`);
-          });
+          };
+          this.forwardToAgent(JSON.stringify(fallbackResponse), agentStdout);
+        }
         return;
       }
 
@@ -520,10 +527,22 @@ export class ProxyEngine {
         }
         this.forwardToAgent(JSON.stringify(response), agentStdout);
       }
-    } else {
-      // Notification
+    } else if (isResponse || isNotification) {
+      // It's a response from the IDE to an upstream server (e.g. for sampling or ping)
+      // OR a notification from the IDE to the upstream server (e.g. initialized)
+      // Since we don't track which upstream sent it, we broadcast the raw JSON to all upstreams.
       for (const ns of this.upstreamManager.getNamespaces()) {
-        this.upstreamManager.callUpstreamDirect(ns, parsed.method, parsed.params, undefined).catch(() => {});
+        const inst = this.upstreamManager.getUpstreamInstance(ns);
+        if (inst && inst.process && inst.process.stdin && !inst.process.stdin.destroyed) {
+          inst.process.stdin.write(line + '\n');
+        }
+      }
+    } else {
+      // Fallback for malformed messages
+      const defNs = this.upstreamManager.getNamespaces()[0] || 'default';
+      const inst = this.upstreamManager.getUpstreamInstance(defNs);
+      if (inst && inst.process && inst.process.stdin && !inst.process.stdin.destroyed) {
+        inst.process.stdin.write(line + '\n');
       }
     }
   }

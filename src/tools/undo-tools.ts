@@ -207,7 +207,7 @@ export const UNDO_TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        limit: { type: 'integer', default: 10, description: 'Number of recent changes to return (default: 10)' },
+        limit: { type: 'integer', default: 50, description: 'Number of recent raw actions to return (default: 50)' },
         namespace: { type: 'string', description: 'Filter by namespace (optional)' },
         tool_name: { type: 'string', description: 'Filter by tool name (optional)' }
       }
@@ -407,10 +407,12 @@ function findTransitiveDependents(targetId: string, actions: HistoryEntry[]): Se
 
 // --- Tool Handlers ---
 
+import { truncateLargeData } from './truncate.js';
+
 export function handleListHistory(
   dbManager: DatabaseManager,
   workingDirectory: string,
-  limit: number = 10
+  limit: number = 50
 ): HistoryEntry[] {
   const actions = dbManager.getRecentActionsForProject(workingDirectory, limit);
   
@@ -431,7 +433,12 @@ export function handleListHistory(
   detectDependencies(entries);
   detectSameResourceDeps(entries);
 
-  return entries;
+  // Truncate payloads for output
+  return entries.map(e => ({
+    ...e,
+    parameters: truncateLargeData(e.parameters, 2000),
+    resultData: truncateLargeData(e.resultData, 2000),
+  }));
 }
 
 export function handleSearchHistory(
@@ -504,8 +511,20 @@ export function handleSearchHistory(
 
   return {
     found: true,
-    matched_action: matchedEntry,
-    dependents,
-    alternatives
+    matched_action: {
+      ...matchedEntry,
+      parameters: truncateLargeData(matchedEntry.parameters, 2000),
+      resultData: truncateLargeData(matchedEntry.resultData, 2000),
+    },
+    dependents: dependents.map(e => ({
+      ...e,
+      parameters: truncateLargeData(e.parameters, 2000),
+      resultData: truncateLargeData(e.resultData, 2000),
+    })),
+    alternatives: alternatives.map(e => ({
+      ...e,
+      parameters: truncateLargeData(e.parameters, 2000),
+      resultData: truncateLargeData(e.resultData, 2000),
+    }))
   };
 }
