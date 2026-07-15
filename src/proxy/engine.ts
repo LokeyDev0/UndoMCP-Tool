@@ -33,9 +33,10 @@ export interface ProxyEngineOptions {
 /** Regex patterns for tools that modify local files */
 const FILE_TOOL_PATTERNS = [
   /write[_-]?file/i, /create[_-]?file/i, /edit[_-]?file/i,
-  /replace[_-]?file/i, /delete[_-]?file/i, /move[_-]?file/i,
-  /rename[_-]?file/i, /write[_-]?to[_-]?file/i, /overwrite/i,
-  /append[_-]?file/i, /patch/i
+  /replace[_-]?file/i, /delete[_-]?file/i, /remove[_-]?file/i,
+  /move[_-]?file/i, /rename[_-]?file/i, /copy[_-]?file/i,
+  /write[_-]?to[_-]?file/i, /overwrite/i, /append[_-]?file/i,
+  /^patch$/i, /^patch[_-]?file$/i, /create[_-]?directory/i, /mkdir/i
 ];
 
 export class ProxyEngine {
@@ -315,6 +316,10 @@ export class ProxyEngine {
             actionId = `act_${nanoid()}`;
 
             const args = parsed.params?.arguments || {};
+            const isFileModifying = FILE_TOOL_PATTERNS.some(p => p.test(baseToolName));
+            const filePath = args.path || args.filePath || args.file || args.TargetFile || args.filename || args.uri || args.target || args.targetPath || args.outputPath;
+            const actionType = (isFileModifying && filePath) ? 'file_change' : 'mcp_call';
+
             let label = `Call ${toolName}`;
             if (baseToolName === 'write_file' || baseToolName === 'edit_file' || baseToolName === 'replace_file_content' || baseToolName === 'write_to_file') {
               const filePath = args.path || args.TargetFile || args.filePath || '';
@@ -336,7 +341,7 @@ export class ProxyEngine {
               turnId: this.turnId,
               sequenceNum: this.nextSequenceNum++,
               timestamp: new Date(startTime).toISOString(),
-              actionType: 'mcp_call',
+              actionType,
               toolName: baseToolName,
               namespace,
               parameters: args,
@@ -353,7 +358,7 @@ export class ProxyEngine {
         // Phase 6: Capture pre-snapshot for file-modifying tools
         const args = parsed.params?.arguments || {};
         const isFileModifying = FILE_TOOL_PATTERNS.some(p => p.test(baseToolName));
-        const filePath = args.path || args.filePath || args.file || args.TargetFile || args.filename;
+        const filePath = args.path || args.filePath || args.file || args.TargetFile || args.filename || args.uri || args.target || args.targetPath || args.outputPath;
         let preHash: string | undefined;
 
         if (isFileModifying && filePath && this.snapshotStore && actionId) {

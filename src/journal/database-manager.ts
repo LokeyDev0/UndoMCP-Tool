@@ -459,7 +459,7 @@ export class DatabaseManager {
       INNER JOIN sessions s ON a.session_id = s.id
       WHERE (LOWER(REPLACE(s.working_directory, '\\', '/')) = ?
              OR LOWER(REPLACE(s.working_directory, '\\', '/')) LIKE ? || '%')
-        AND a.action_type = 'mcp_call'
+        AND a.action_type IN ('mcp_call', 'file_change')
         AND a.state = 'executed'
       ORDER BY a.timestamp DESC, a.sequence_num DESC
       LIMIT ?

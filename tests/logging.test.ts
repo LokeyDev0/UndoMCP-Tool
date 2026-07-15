@@ -88,7 +88,7 @@ describe('ProxyEngine Transaction Logging', () => {
               const action = actions[0];
               expect(action.turnId).toBe(turnId);
               expect(action.sequenceNum).toBe(1);
-              expect(action.actionType).toBe('mcp_call');
+              expect(action.actionType).toBe('file_change');
               expect(action.toolName).toBe('write_file');
               expect(action.namespace).toBe('mock_server');
               expect(action.parameters).toEqual({ path: 'myfile.txt', content: 'hello' });
