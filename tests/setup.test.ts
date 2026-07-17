@@ -77,7 +77,8 @@ describe('setup command', () => {
       '--command',
       'node',
       '--args',
-      'sqlite.js'
+      'sqlite.js',
+      '--no-tools'
     ]);
     expect(cursorContent.mcpServers['sqlite-server'].__originalCommand).toBe('node');
     expect(cursorContent.mcpServers['sqlite-server'].__originalArgs).toEqual(['sqlite.js']);
@@ -94,7 +95,8 @@ describe('setup command', () => {
       'serve',
       '--command',
       'gcal-mcp',
-      '--args'
+      '--args',
+      '--no-tools'
     ]);
 
     // Now restore configs
@@ -174,7 +176,7 @@ describe('setup command', () => {
       expect(content.mcp).toBeDefined();
       expect(content.mcp.undomcp).toBeDefined();
       expect(content.mcp.undomcp.command).toBe('/mock/bin/undomcp');
-      expect(content.mcp.undomcp.args).toEqual(['serve', '--command', 'node', '--args', '-e', '""']);
+      expect(content.mcp.undomcp.args).toEqual(['serve']);
 
       // Verify skills were installed ONLY for detected IDEs
       const claudeSkillPath = path.join(tempDir, '.claude/skills/undomcp/SKILL.md');
@@ -285,6 +287,91 @@ describe('setup command', () => {
     } finally {
       if (fs.existsSync(mockContinuePath)) fs.unlinkSync(mockContinuePath);
       if (fs.existsSync(mockContinuePath + '.undomcp-backup')) fs.unlinkSync(mockContinuePath + '.undomcp-backup');
+    }
+  });
+
+  it('should wrap HTTP servers with explicit auth by rewriting URL to local proxy', async () => {
+    const mockHttpPath = path.join(tempDir, `http-mcp-test-${Date.now()}.json`);
+
+    const mockConfig = {
+      mcpServers: {
+        'apikey-server': {
+          type: 'http',
+          url: 'https://api.example.com/mcp',
+          headers: { 'Authorization': 'Bearer sk_secret_key' }
+        },
+        'stdio-server': {
+          command: 'node',
+          args: ['server.js']
+        }
+      }
+    };
+    fs.writeFileSync(mockHttpPath, JSON.stringify(mockConfig, null, 2), 'utf8');
+
+    setClientConfigsOverride([{ name: 'Claude Code', paths: [mockHttpPath] }]);
+
+    try {
+      await runSetup({ binaryPath: '/mock/bin/undomcp', all: true });
+
+      const content = JSON.parse(fs.readFileSync(mockHttpPath, 'utf8'));
+
+      // HTTP server with explicit auth should have URL rewritten to local proxy
+      expect(content.mcpServers['apikey-server'].__originalUrl).toBe('https://api.example.com/mcp');
+      expect(content.mcpServers['apikey-server'].url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/proxy\/apikey-server\/$/);
+      expect(content.mcpServers['apikey-server'].type).toBe('http');
+      expect(content.mcpServers['apikey-server'].headers).toEqual({ 'Authorization': 'Bearer sk_secret_key' });
+
+      // stdio server should still be wrapped normally
+      expect(content.mcpServers['stdio-server'].command).toBe('/mock/bin/undomcp');
+
+      // Restore
+      await runSetup({ restore: true, binaryPath: '/mock/bin/undomcp' });
+
+      const restored = JSON.parse(fs.readFileSync(mockHttpPath, 'utf8'));
+      expect(restored.mcpServers['apikey-server'].url).toBe('https://api.example.com/mcp');
+      expect(restored.mcpServers['apikey-server'].__originalUrl).toBeUndefined();
+    } finally {
+      setClientConfigsOverride(null);
+      if (fs.existsSync(mockHttpPath)) fs.unlinkSync(mockHttpPath);
+      if (fs.existsSync(mockHttpPath + '.undomcp-backup')) fs.unlinkSync(mockHttpPath + '.undomcp-backup');
+    }
+  });
+
+  it('should mark OAuth HTTP servers as tracked without rewriting URL', async () => {
+    const mockHttpPath = path.join(tempDir, `oauth-mcp-test-${Date.now()}.json`);
+
+    const mockConfig = {
+      mcpServers: {
+        'notion': {
+          type: 'http',
+          url: 'https://mcp.notion.com/mcp'
+        }
+      }
+    };
+    fs.writeFileSync(mockHttpPath, JSON.stringify(mockConfig, null, 2), 'utf8');
+
+    setClientConfigsOverride([{ name: 'Claude Code', paths: [mockHttpPath] }]);
+
+    try {
+      await runSetup({ binaryPath: '/mock/bin/undomcp', all: true });
+
+      const content = JSON.parse(fs.readFileSync(mockHttpPath, 'utf8'));
+
+      // OAuth server should NOT have URL rewritten (would break OAuth)
+      expect(content.mcpServers['notion'].url).toBe('https://mcp.notion.com/mcp');
+      expect(content.mcpServers['notion'].__originalUrl).toBeUndefined();
+      expect(content.mcpServers['notion'].__undomcp_disabled).toBe(true);
+
+      // Restore
+      await runSetup({ restore: true, binaryPath: '/mock/bin/undomcp' });
+
+      const restored = JSON.parse(fs.readFileSync(mockHttpPath, 'utf8'));
+      expect(restored.mcpServers['notion'].url).toBe('https://mcp.notion.com/mcp');
+      expect(restored.mcpServers['notion'].__undomcp_disabled).toBeUndefined();
+    } finally {
+      setClientConfigsOverride(null);
+      if (fs.existsSync(mockHttpPath)) fs.unlinkSync(mockHttpPath);
+      if (fs.existsSync(mockHttpPath + '.undomcp-backup')) fs.unlinkSync(mockHttpPath + '.undomcp-backup');
     }
   });
 });

@@ -241,6 +241,21 @@ export const UNDO_TOOLS = [
       },
       required: ['query']
     }
+  },
+  {
+    name: 'undomcp_report_action',
+    description: 'Report an MCP tool call that was made to an external HTTP MCP server (e.g., Notion, GitHub). Call this IMMEDIATELY AFTER making any tool call to an HTTP-based MCP server so it is recorded in the undo journal. This enables undo for OAuth-authenticated servers that cannot be proxied. Do NOT report native IDE tools (Edit, Bash, Write, Read, Glob, Grep) — only external MCP server calls.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tool_name: { type: 'string', description: 'The tool name that was called (e.g., "notion-create-pages")' },
+        namespace: { type: 'string', description: 'The MCP server namespace (e.g., "notion")' },
+        parameters: { type: 'object', description: 'The parameters that were passed to the tool' },
+        result: { type: 'object', description: 'The result returned by the tool (include IDs for undo)' },
+        success: { type: 'boolean', description: 'Whether the call succeeded', default: true }
+      },
+      required: ['tool_name', 'namespace', 'parameters']
+    }
   }
 ];
 

@@ -5,12 +5,15 @@ import * as yaml from 'yaml';
 import * as readline from 'readline';
 import { Readable, Writable } from 'stream';
 import { nanoid } from 'nanoid';
+import { HttpUpstreamClient } from './http-upstream-client.js';
 
 export interface UpstreamDefinition {
-  command: string;
-  args: string[];
+  command?: string;
+  args?: string[];
   env?: Record<string, string>;
-  transport?: 'stdio';
+  transport: 'stdio' | 'http' | 'sse' | 'ws';
+  url?: string;
+  headers?: Record<string, string>;
 }
 
 export interface UpstreamInstance {
@@ -18,6 +21,7 @@ export interface UpstreamInstance {
   definition: UpstreamDefinition;
   process: ChildProcess | null;
   reader: readline.Interface | null;
+  httpClient?: HttpUpstreamClient;
   pendingRequests: Map<string | number, (response: any) => void>;
   exitCode?: number | null;
   signal?: string | null;
@@ -42,7 +46,7 @@ export class UpstreamManager {
    */
   private loadConfig(configPath?: string, fallback?: { command: string; args: string[] }): void {
     const resolvedPath = configPath || path.resolve('undomcp.config.yaml');
-    
+
     if (fs.existsSync(resolvedPath)) {
       try {
         const fileContent = fs.readFileSync(resolvedPath, 'utf8');
@@ -51,11 +55,14 @@ export class UpstreamManager {
           const namespaces = Object.keys(parsed.upstreams);
           for (const ns of namespaces) {
             const def = parsed.upstreams[ns];
+            const transport = def.transport || (def.url ? 'http' : 'stdio');
             this.addUpstream(ns, {
               command: def.command,
               args: def.args || [],
               env: def.env,
-              transport: def.transport || 'stdio'
+              transport,
+              url: def.url,
+              headers: def.headers,
             });
           }
           if (namespaces.length > 0) {
@@ -93,19 +100,42 @@ export class UpstreamManager {
     });
   }
 
+  public registerHttpUpstream(namespace: string, url: string, transport: 'http' | 'sse' | 'ws', headers?: Record<string, string>): void {
+    this.addUpstream(namespace, { transport, url, headers });
+    if (!this.defaultNamespace) {
+      this.defaultNamespace = namespace;
+    }
+  }
+
   /**
-   * Spawns all child processes.
+   * Spawns all child processes and initializes HTTP clients.
    */
   public start(agentStderr: Writable = process.stderr): void {
     this.isStopping = false;
 
     for (const [ns, inst] of this.upstreams.entries()) {
       const def = inst.definition;
+
+      if (def.transport !== 'stdio') {
+        // HTTP/SSE/WS transport — initialize HTTP client
+        if (def.url) {
+          inst.httpClient = new HttpUpstreamClient({
+            url: def.url,
+            transport: def.transport === 'sse' ? 'sse' : def.transport === 'ws' ? 'ws' : 'http',
+            defaultHeaders: def.headers,
+          });
+        }
+        continue;
+      }
+
+      // stdio transport — spawn child process
+      if (!def.command) continue;
+
       const combinedEnv = { ...process.env, ...(def.env || {}) } as Record<string, string>;
 
       const isWin = process.platform === 'win32';
       const cmd = isWin ? (process.env.COMSPEC || 'cmd.exe') : def.command;
-      const args = isWin ? ['/d', '/s', '/c', def.command, ...def.args] : def.args;
+      const args = isWin ? ['/d', '/s', '/c', def.command, ...(def.args || [])] : (def.args || []);
 
       inst.exitCode = null;
       inst.signal = null;
@@ -176,7 +206,7 @@ export class UpstreamManager {
   }
 
   /**
-   * Terminates all child processes.
+   * Terminates all child processes and closes HTTP clients.
    */
   public stop(): void {
     this.isStopping = true;
@@ -189,6 +219,9 @@ export class UpstreamManager {
       if (inst.process) {
         inst.process.kill('SIGTERM');
       }
+      if (inst.httpClient) {
+        inst.httpClient.close();
+      }
     }
   }
 
@@ -196,6 +229,8 @@ export class UpstreamManager {
    * Lists tools from all upstreams, applying namespacing where appropriate.
    */
   public async listAllTools(): Promise<any[]> {
+    if (this.upstreams.size === 0) return [];
+
     const promises = Array.from(this.upstreams.entries()).map(async ([ns, inst]) => {
       const response = await this.callUpstreamDirect(ns, 'tools/list', {});
       if (response && response.result && Array.isArray(response.result.tools)) {
@@ -225,6 +260,15 @@ export class UpstreamManager {
       throw new Error(`Upstream namespace "${namespace}" is not defined.`);
     }
 
+    // HTTP transport path
+    if (inst.definition.transport !== 'stdio' && inst.httpClient) {
+      const id = customId !== undefined ? customId : `up_${nanoid()}`;
+      const request = { jsonrpc: '2.0', id, method, params };
+      const result = await inst.httpClient.forwardRequest(request, inst.definition.headers || {});
+      return result.body;
+    }
+
+    // stdio transport path
     if (inst.spawnError) {
       throw new Error(`Upstream [${namespace}] failed to start: ${inst.spawnError.message}`);
     }
@@ -266,7 +310,7 @@ export class UpstreamManager {
       } else {
         clearTimeout(timer);
         inst.pendingRequests.delete(id);
-        
+
         // Re-check exit code in case it died right now
         if (inst.exitCode !== null && inst.exitCode !== undefined) {
           const lastStderr = inst.stderrBuffer?.join('').trim() || '';
@@ -317,6 +361,20 @@ export class UpstreamManager {
   public async broadcast(method: string, params: any, customId?: string | number): Promise<any> {
     const namespaces = this.getNamespaces();
     if (namespaces.length === 0) {
+      if (method === 'initialize') {
+        return {
+          jsonrpc: '2.0',
+          id: customId,
+          result: {
+            protocolVersion: '2024-11-05',
+            capabilities: { tools: {} },
+            serverInfo: {
+              name: 'undomcp-standalone',
+              version: '1.0.0'
+            }
+          }
+        };
+      }
       throw new Error('No upstream servers configured.');
     }
 

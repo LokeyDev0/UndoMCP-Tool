@@ -92,7 +92,7 @@ describe('ProxyEngine Transaction Logging', () => {
               expect(action.toolName).toBe('write_file');
               expect(action.namespace).toBe('mock_server');
               expect(action.parameters).toEqual({ path: 'myfile.txt', content: 'hello' });
-              expect(action.metadata?.label).toBe('Modify file: myfile.txt');
+              expect(action.metadata?.label).toBe('write_file: myfile.txt');
               
               // Post-response verification
               expect(action.resultSuccess).toBe(1);
@@ -154,7 +154,7 @@ describe('ProxyEngine Transaction Logging', () => {
             expect(action).toBeDefined();
             expect(action?.toolName).toBe('run_command');
             expect(action?.namespace).toBeUndefined();
-            expect(action?.metadata?.label).toBe('Execute command: npm run build');
+            expect(action?.metadata?.label).toBe('run_command: npm run build');
 
             proxy.stop();
             resolve();

@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as readline from 'readline';
+import { HttpRegistry } from '../proxy/http-registry.js';
 
 export function parseJsonc(content: string): any {
   // Strip comments (both single line and multi-line)
@@ -395,9 +396,16 @@ export interface SetupOptions {
 async function resolveUndomcpBinary(explicitPath?: string): Promise<string> {
   if (explicitPath) return explicitPath;
 
+  // 1. If we are running via node and the script path exists, return that script path.
+  // This is the safest, most cross-platform way to spawn the proxy in MCP clients.
+  // It avoids spawning `.cmd` scripts directly, which fails in IDEs on Windows without shell: true.
+  if (process.argv[1] && fs.existsSync(process.argv[1]) && (process.argv[1].endsWith('.js') || process.argv[1].endsWith('.ts'))) {
+    return path.resolve(process.argv[1]);
+  }
+
   const { execSync } = await import('child_process');
 
-  // 1. Try to find 'undomcp' in PATH
+  // 2. Try to find 'undomcp' in PATH
   try {
     const whichCmd = process.platform === 'win32' ? 'where undomcp' : 'which undomcp';
     const found = execSync(whichCmd, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim().split('\n')[0].replace(/\r/g, '');
@@ -408,7 +416,7 @@ async function resolveUndomcpBinary(explicitPath?: string): Promise<string> {
     // Not in PATH
   }
 
-  // 2. Try global npm prefix
+  // 3. Try global npm prefix
   try {
     const prefix = execSync('npm prefix -g', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim().replace(/\r/g, '');
     const globalPath = process.platform === 'win32'
@@ -421,19 +429,50 @@ async function resolveUndomcpBinary(explicitPath?: string): Promise<string> {
     // ignore prefix resolution failures
   }
 
-  // 3. Check if we're running as a compiled binary (not via node)
+  // 4. Check if we're running as a compiled binary (not via node)
   const isCompiled = !process.argv[1] || !process.argv[1].endsWith('.js');
   if (isCompiled && !process.argv[0].endsWith('node') && !process.argv[0].endsWith('node.exe')) {
     return process.argv[0];
   }
 
-  // 4. If we are running via node and the script path exists, return that script path
-  if (process.argv[1] && fs.existsSync(process.argv[1])) {
-    return path.resolve(process.argv[1]);
-  }
-
   // Last resort: assume 'undomcp' will be in PATH
   return 'undomcp';
+}
+
+/**
+ * Detects the project directory associated with a config file and server key.
+ * For project-scoped configs (e.g. Claude Code's per-project mcpServers),
+ * extracts the project path. Falls back to the config file's directory.
+ */
+function detectProjectDirForConfig(configPath: string, serverKey: string): string | undefined {
+  try {
+    const content = fs.readFileSync(configPath, 'utf8');
+    const parsed = JSON.parse(content);
+
+    // Claude Code stores project-level servers under "projects" -> "C:/path" -> "mcpServers"
+    if (parsed.projects && typeof parsed.projects === 'object') {
+      for (const [projectPath, projectConfig] of Object.entries(parsed.projects)) {
+        const cfg = projectConfig as any;
+        if (cfg.mcpServers && typeof cfg.mcpServers === 'object') {
+          if (serverKey in cfg.mcpServers) {
+            return projectPath;
+          }
+        }
+      }
+    }
+  } catch {
+    // Fall through to directory-based detection
+  }
+
+  // For IDE-specific configs that live inside a project directory
+  const dir = path.dirname(configPath);
+  const parentDir = path.dirname(dir);
+  // If config is inside a project (e.g. .cursor/mcp.json inside project root)
+  if (path.basename(dir).startsWith('.')) {
+    return parentDir;
+  }
+
+  return undefined;
 }
 
 export async function runSetup(options: SetupOptions = {}): Promise<void> {
@@ -500,6 +539,9 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
     targetPaths = new Set(selected.map((c) => c.foundPath));
     selectedIdeNames = new Set(selected.map((c) => c.name));
   }
+
+  // --- Initialize HTTP registry for HTTP/SSE/WS server tracking ---
+  const httpRegistry = new HttpRegistry();
 
   // --- Process each config file ---
   let modifiedCount = 0;
@@ -640,7 +682,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
           if (srvName === 'undomcp') continue;
 
           if (options.restore) {
-            // Restore original server config if it was wrapped
+            // Restore original server config if it was wrapped (stdio)
             if (srv.__originalCommand) {
               if (typeof srv.__originalCommand === 'object' && srv.__originalCommand !== null) {
                 srv.command = srv.__originalCommand;
@@ -653,21 +695,27 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
               }
               fileChanged = true;
             }
+            // Restore original URL if it was wrapped (HTTP/SSE/WS)
+            if (srv.__originalUrl) {
+              srv.url = srv.__originalUrl;
+              delete srv.__originalUrl;
+              httpRegistry.unregister(srvName);
+              fileChanged = true;
+            }
+            // Restore OAuth-managed HTTP servers that were marked
+            if (srv.__undomcp_disabled) {
+              delete srv.__undomcp_disabled;
+              httpRegistry.unregister(srvName);
+              fileChanged = true;
+            }
           } else {
-            // Wrap server if not already wrapped
-            const isCommandObject = typeof srv.command === 'object' && srv.command !== null;
-            const cmdPath = isCommandObject ? srv.command.path : srv.command;
-            const cmdArgs = isCommandObject ? srv.command.args : srv.args;
+            // Determine if this is an HTTP-type server
+            const isHttpType = srv.type && ['http', 'streamable-http', 'sse', 'ws'].includes(srv.type);
+            const hasUrl = typeof srv.url === 'string' && srv.url.startsWith('http');
+            const isHttpServer = (isHttpType || hasUrl) && !srv.command;
 
-            const isWrapped = typeof cmdPath === 'string' && (
-              cmdPath === undomcpBin ||
-              cmdPath.endsWith('undomcp') ||
-              cmdPath.endsWith('undomcp.exe') ||
-              ((cmdPath.endsWith('node') || cmdPath.endsWith('node.exe')) && Array.isArray(cmdArgs) && cmdArgs.includes(undomcpBin))
-            );
-
-            if (!isWrapped && typeof cmdPath === 'string') {
-              // Create backup before first modification
+            if (isHttpServer && !srv.__originalUrl && !srv.__undomcp_disabled) {
+              // HTTP/SSE/WS server — register in HTTP registry
               if (!fileChanged) {
                 const backupPath = backupConfigFile(configPath);
                 if (backupPath) {
@@ -675,29 +723,74 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
                 }
               }
 
-              if (isCommandObject) {
-                srv.__originalCommand = JSON.parse(JSON.stringify(srv.command));
-                const runWithNode = undomcpBin.endsWith('.js') || undomcpBin.endsWith('.ts');
-                if (runWithNode) {
-                  srv.command.path = process.execPath;
-                  srv.command.args = [undomcpBin, 'serve', '--command', srv.__originalCommand.path, '--args', ...(srv.__originalCommand.args || [])];
-                } else {
-                  srv.command.path = undomcpBin;
-                  srv.command.args = ['serve', '--command', srv.__originalCommand.path, '--args', ...(srv.__originalArgs || [])];
-                }
+              const transport = srv.type || 'http';
+              const projectDir = detectProjectDirForConfig(configPath, key);
+              const hasExplicitAuth = srv.headers && (
+                srv.headers['Authorization'] || srv.headers['authorization'] ||
+                srv.headers['X-API-Key'] || srv.headers['x-api-key']
+              );
+
+              httpRegistry.register(srvName, {
+                url: srv.url,
+                transport,
+                projectDir,
+              });
+
+              if (hasExplicitAuth) {
+                // API-key auth: safe to rewrite URL to local proxy
+                srv.__originalUrl = srv.url;
+                srv.url = httpRegistry.buildLocalUrl(srvName);
               } else {
-                srv.__originalCommand = srv.command;
-                srv.__originalArgs = srv.args || [];
-                const runWithNode = undomcpBin.endsWith('.js') || undomcpBin.endsWith('.ts');
-                if (runWithNode) {
-                  srv.command = process.execPath;
-                  srv.args = [undomcpBin, 'serve', '--command', srv.__originalCommand, '--args', ...(srv.__originalArgs || [])];
-                } else {
-                  srv.command = undomcpBin;
-                  srv.args = ['serve', '--command', srv.__originalCommand, '--args', ...(srv.__originalArgs || [])];
-                }
+                // OAuth-managed: track but don't rewrite URL
+                srv.__undomcp_disabled = true;
               }
               fileChanged = true;
+            } else if (!isHttpServer) {
+              // stdio server — wrap with undomcp proxy
+              const isCommandObject = typeof srv.command === 'object' && srv.command !== null;
+              const cmdPath = isCommandObject ? srv.command.path : srv.command;
+              const cmdArgs = isCommandObject ? srv.command.args : srv.args;
+
+              const isWrapped = typeof cmdPath === 'string' && (
+                cmdPath === undomcpBin ||
+                cmdPath.endsWith('undomcp') ||
+                cmdPath.endsWith('undomcp.exe') ||
+                ((cmdPath.endsWith('node') || cmdPath.endsWith('node.exe')) && Array.isArray(cmdArgs) && cmdArgs.includes(undomcpBin))
+              );
+
+              if (!isWrapped && typeof cmdPath === 'string') {
+                // Create backup before first modification
+                if (!fileChanged) {
+                  const backupPath = backupConfigFile(configPath);
+                  if (backupPath) {
+                    console.log(`[undomcp] Backup created: ${shortenPath(backupPath)}`);
+                  }
+                }
+
+                if (isCommandObject) {
+                  srv.__originalCommand = JSON.parse(JSON.stringify(srv.command));
+                  const runWithNode = undomcpBin.endsWith('.js') || undomcpBin.endsWith('.ts');
+                  if (runWithNode) {
+                    srv.command.path = process.execPath;
+                    srv.command.args = [undomcpBin, 'serve', '--command', srv.__originalCommand.path, '--args', ...(srv.__originalCommand.args || []), '--no-tools'];
+                  } else {
+                    srv.command.path = undomcpBin;
+                    srv.command.args = ['serve', '--command', srv.__originalCommand.path, '--args', ...(srv.__originalArgs || []), '--no-tools'];
+                  }
+                } else {
+                  srv.__originalCommand = srv.command;
+                  srv.__originalArgs = srv.args || [];
+                  const runWithNode = undomcpBin.endsWith('.js') || undomcpBin.endsWith('.ts');
+                  if (runWithNode) {
+                    srv.command = process.execPath;
+                    srv.args = [undomcpBin, 'serve', '--command', srv.__originalCommand, '--args', ...(srv.__originalArgs || []), '--no-tools'];
+                  } else {
+                    srv.command = undomcpBin;
+                    srv.args = ['serve', '--command', srv.__originalCommand, '--args', ...(srv.__originalArgs || []), '--no-tools'];
+                  }
+                }
+                fileChanged = true;
+              }
             }
           }
         }
@@ -708,8 +801,8 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
           const runWithNode = undomcpBin.endsWith('.js') || undomcpBin.endsWith('.ts');
           const cmd = runWithNode ? process.execPath : undomcpBin;
           const args = runWithNode
-            ? [undomcpBin, 'serve', '--command', 'node', '--args', '-e', '""']
-            : ['serve', '--command', 'node', '--args', '-e', '""'];
+            ? [undomcpBin, 'serve']
+            : ['serve'];
 
           if (isZed) {
             return {
@@ -765,6 +858,76 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
             if (servers.undomcp && isUndomcpServer(servers.undomcp)) {
               delete servers.undomcp;
               fileChanged = true;
+            }
+          }
+        }
+
+        // Also process project-scoped MCP servers (e.g., Claude Code's per-project mcpServers)
+        if (parsed.projects && typeof parsed.projects === 'object') {
+          for (const [projectPath, projectConfig] of Object.entries(parsed.projects)) {
+            const pCfg = projectConfig as any;
+            if (!pCfg || !pCfg.mcpServers || typeof pCfg.mcpServers !== 'object') continue;
+
+            for (const [srvKey, srvVal] of Object.entries(pCfg.mcpServers)) {
+              const srv = srvVal as any;
+              if (!srv || typeof srv !== 'object') continue;
+              if (srvKey === 'undomcp') continue;
+
+              if (options.restore) {
+                // Restore HTTP servers that were rewritten
+                if (srv.__originalUrl) {
+                  srv.url = srv.__originalUrl;
+                  delete srv.__originalUrl;
+                  httpRegistry.unregister(srvKey);
+                  fileChanged = true;
+                }
+                // Restore HTTP servers that were disabled (OAuth-managed)
+                if (srv.__undomcp_disabled) {
+                  delete srv.__undomcp_disabled;
+                  httpRegistry.unregister(srvKey);
+                  fileChanged = true;
+                }
+              } else {
+                const isHttpType = srv.type && ['http', 'streamable-http', 'sse', 'ws'].includes(srv.type);
+                const hasUrl = typeof srv.url === 'string' && srv.url.startsWith('http');
+                const isHttpServer = (isHttpType || hasUrl) && !srv.command;
+
+                if (isHttpServer && !srv.__originalUrl && !srv.__undomcp_disabled) {
+                  if (!fileChanged) {
+                    const backupPath = backupConfigFile(configPath);
+                    if (backupPath) {
+                      console.log(`[undomcp] Backup created: ${shortenPath(backupPath)}`);
+                    }
+                  }
+
+                  const transport = srv.type || 'http';
+                  const hasExplicitAuth = srv.headers && (
+                    srv.headers['Authorization'] || srv.headers['authorization'] ||
+                    srv.headers['X-API-Key'] || srv.headers['x-api-key']
+                  );
+
+                  if (hasExplicitAuth) {
+                    // API-key auth: safe to rewrite URL to local proxy
+                    httpRegistry.register(srvKey, {
+                      url: srv.url,
+                      transport,
+                      projectDir: projectPath,
+                    });
+                    srv.__originalUrl = srv.url;
+                    srv.url = httpRegistry.buildLocalUrl(srvKey);
+                  } else {
+                    // OAuth-managed: register for tool proxying via standalone undomcp server
+                    // Mark as tracked but don't change URL (OAuth binds to original URL)
+                    httpRegistry.register(srvKey, {
+                      url: srv.url,
+                      transport,
+                      projectDir: projectPath,
+                    });
+                    srv.__undomcp_disabled = true;
+                  }
+                  fileChanged = true;
+                }
+              }
             }
           }
         }
@@ -949,6 +1112,34 @@ After all undos are complete:
    **"Manual Undo Guide"** section organized by application. Use actual resource
    names, IDs, and content from the original call parameters and results. Be
    specific enough that the user can follow the steps without guessing.
+
+## Reporting HTTP MCP Actions
+
+**IMPORTANT:** After making ANY state-changing tool call to an HTTP-based MCP server
+(such as Notion, GitHub, or any server that uses OAuth authentication), you MUST
+immediately call \\\`undomcp_report_action\\\` to log it in the undo journal.
+
+This is required because OAuth-authenticated MCP servers cannot be proxied, so
+their calls are not automatically recorded.
+
+**When to call \\\`undomcp_report_action\\\`:**
+- After creating, updating, deleting, or modifying any resource via an HTTP MCP tool
+- Do NOT report read-only operations (get, list, search, query)
+- Do NOT report native IDE/agent tools (Edit, Bash, Write, Read, Glob, Grep, Agent, etc.) — these are NOT MCP tools
+
+**How to call it:**
+\\\`\\\`\\\`json
+{
+  "tool_name": "notion-create-pages",
+  "namespace": "notion",
+  "parameters": { ... the parameters you passed to the tool ... },
+  "result": { ... the result returned by the tool (include any IDs) ... },
+  "success": true
+}
+\\\`\\\`\\\`
+
+Include the full result data (especially resource IDs like page_id, block_id, etc.)
+as these are needed to construct inverse operations during undo.
 `;
 
   const mdcContent = `---
@@ -1136,6 +1327,36 @@ actual resource names and IDs from the original call data.
     } catch (err: any) {
       console.error(`[undomcp] Failed to install Claude Code skill: ${err.message}`);
     }
+
+    // Install PostToolUse hook for automatic MCP action recording
+    const settingsPath = path.join(home, '.claude/settings.json');
+    try {
+      let settings: any = {};
+      if (fs.existsSync(settingsPath)) {
+        settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      }
+      if (!settings.hooks) settings.hooks = {};
+      if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
+
+      // Claude Code hook format: {matcher: string, hooks: [{type, command}]}
+      const hasUndomcpHook = settings.hooks.PostToolUse.some((entry: any) =>
+        entry.hooks && entry.hooks.some((h: any) => h.command && h.command.includes('report-hook'))
+      );
+
+      if (!hasUndomcpHook) {
+        settings.hooks.PostToolUse.push({
+          matcher: 'mcp__',
+          hooks: [{
+            type: 'command',
+            command: 'undomcp report-hook'
+          }]
+        });
+        fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
+        console.log(`[undomcp] Installed Claude Code PostToolUse hook for automatic recording`);
+      }
+    } catch (err: any) {
+      console.error(`[undomcp] Failed to install Claude Code hook: ${err.message}`);
+    }
   }
 
   // 2. Gemini / Antigravity Global Skill
@@ -1209,6 +1430,22 @@ function removeAdapterSkills(): void {
     if (fs.existsSync(claudeSkillsDir)) {
       fs.rmSync(claudeSkillsDir, { recursive: true, force: true });
       console.log(`[undomcp] Removed Claude Code global skill.`);
+    }
+  } catch {}
+
+  // Remove PostToolUse hook
+  try {
+    const settingsPath = path.join(home, '.claude/settings.json');
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      if (settings.hooks && settings.hooks.PostToolUse) {
+        settings.hooks.PostToolUse = settings.hooks.PostToolUse.filter((entry: any) =>
+          !(entry.hooks && entry.hooks.some((h: any) => h.command && h.command.includes('report-hook')))
+        );
+        if (settings.hooks.PostToolUse.length === 0) delete settings.hooks.PostToolUse;
+        if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+        fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
+      }
     }
   } catch {}
 
