@@ -1345,7 +1345,7 @@ actual resource names and IDs from the original call data.
 
       if (!hasUndomcpHook) {
         settings.hooks.PostToolUse.push({
-          matcher: 'mcp__',
+          matcher: 'mcp__.*',
           hooks: [{
             type: 'command',
             command: 'undomcp report-hook'

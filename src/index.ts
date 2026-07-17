@@ -156,12 +156,12 @@ program
         actionType: 'mcp_call',
         toolName: cleanToolName,
         namespace,
-        parameters: data.input || data.parameters || {},
+        parameters: data.tool_input || data.input || data.parameters || {},
         state: 'executed',
-        metadata: { label: generateActionLabel(cleanToolName, data.input || data.parameters || {}) },
+        metadata: { label: generateActionLabel(cleanToolName, data.tool_input || data.input || data.parameters || {}) },
       });
 
-      const result = data.output || data.result || {};
+      const result = data.tool_result || data.output || data.result || {};
       dbManager.updateActionResults(actionId, true, typeof result === 'object' ? result : { raw: result });
       dbManager.close();
     } catch {
