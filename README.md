@@ -110,12 +110,9 @@ UndoMCP auto-detects and configures:
 | Codex CLI | ✅ |
 | Antigravity (Gemini) | ✅ |
 | OpenCode | ✅ |
-| Kilo Code | ✅ |
-| Cline | ✅ |
 | Roo Code | ✅ |
 | Continue | ✅ |
 | Zed | ✅ |
-| JetBrains IDEs | ✅ |
 | Amazon Q | ✅ |
 
 Works with **any MCP server** — no server-side changes needed.
