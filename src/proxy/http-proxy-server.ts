@@ -8,6 +8,7 @@ import { HttpRegistry, HttpUpstreamEntry } from './http-registry.js';
 import { HttpUpstreamClient } from './http-upstream-client.js';
 import { DatabaseManager, Action } from '../journal/database-manager.js';
 import { generateActionLabel } from '../utils/label-generator.js';
+import { shouldRecordTool } from '../utils/tool-filter.js';
 
 const FILE_TOOL_PATTERNS = [
   /write[_-]?file/i, /create[_-]?file/i, /edit[_-]?file/i,
@@ -192,7 +193,7 @@ export class HttpProxyServer {
     let actionId: string | undefined;
     const startTime = Date.now();
 
-    if (isToolCall && !isUndoAction) {
+    if (isToolCall && !isUndoAction && shouldRecordTool(toolName, namespace)) {
       actionId = this.journalPreAction(toolName, namespace, args, entry, startTime);
     }
 

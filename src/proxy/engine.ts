@@ -14,6 +14,7 @@ import {
 import { SchemaCache } from '../undo/schema-cache.js';
 import { InverseResolver } from '../undo/inverse-resolver.js';
 import { generateActionLabel } from '../utils/label-generator.js';
+import { shouldRecordTool, NATIVE_TOOLS } from '../utils/tool-filter.js';
 import { LlmSolver } from '../undo/llm-solver.js';
 import { SnapshotStore, computeSha256 } from '../file-safety/snapshot-store.js';
 import { UndoController } from '../undo/undo-controller.js';
@@ -348,7 +349,7 @@ export class ProxyEngine {
           delete parsedArgs.__is_undo;
         }
 
-        if (this.dbManager && this.sessionId && !isUndoAction) {
+        if (this.dbManager && this.sessionId && !isUndoAction && shouldRecordTool(baseToolName, namespace)) {
           try {
             // Turn clustering
             this.ensureActiveTurnId();
@@ -659,14 +660,14 @@ export class ProxyEngine {
     const resultData = args.result || {};
     const success = args.success !== false;
 
-    const NATIVE_TOOLS = new Set([
-      'edit', 'bash', 'write', 'read', 'glob', 'grep', 'agent',
-      'taskcreate', 'taskupdate', 'taskget', 'tasklist', 'taskstop', 'taskoutput',
-      'webfetch', 'websearch', 'notebook', 'notebookedit', 'artifact',
-    ]);
     if (NATIVE_TOOLS.has(toolName.toLowerCase())) {
       return {
         content: [{ type: 'text', text: JSON.stringify({ recorded: false, reason: 'Native tool — not an MCP call' }) }]
+      };
+    }
+    if (!shouldRecordTool(toolName, namespace)) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ recorded: false, reason: 'Read-only tool — not recorded' }) }]
       };
     }
 

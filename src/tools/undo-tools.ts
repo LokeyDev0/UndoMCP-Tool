@@ -2,6 +2,7 @@
  * Undo Tools — Defines the MCP tools exposed by the UndoMCP proxy and their handlers.
  */
 import { DatabaseManager, Action } from '../journal/database-manager.js';
+import { NATIVE_TOOLS } from '../utils/tool-filter.js';
 
 // --- Dependency Detection (Phase 2) ---
 
@@ -429,8 +430,9 @@ export function handleListHistory(
   workingDirectory: string,
   limit: number = 50
 ): HistoryEntry[] {
-  const actions = dbManager.getRecentActionsForProject(workingDirectory, limit);
-  
+  const actions = dbManager.getRecentActionsForProject(workingDirectory, limit)
+    .filter(a => !NATIVE_TOOLS.has((a.toolName ?? '').toLowerCase()));
+
   const entries: HistoryEntry[] = actions.map(a => ({
     id: a.id,
     sessionId: a.sessionId,
@@ -467,7 +469,8 @@ export function handleSearchHistory(
   alternatives?: HistoryEntry[];
 } {
   // Retrieve a generous number of recent executed actions for search and dependency mapping
-  const actions = dbManager.getRecentActionsForProject(workingDirectory, 1000);
+  const actions = dbManager.getRecentActionsForProject(workingDirectory, 1000)
+    .filter(a => !NATIVE_TOOLS.has((a.toolName ?? '').toLowerCase()));
   if (actions.length === 0) {
     return { found: false };
   }

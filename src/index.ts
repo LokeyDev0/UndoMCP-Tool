@@ -7,6 +7,7 @@ import { HttpRegistry } from './proxy/http-registry.js';
 import { handleListHistory } from './tools/undo-tools.js';
 import { nanoid } from 'nanoid';
 import { generateActionLabel } from './utils/label-generator.js';
+import { shouldRecordTool, extractBaseToolName } from './utils/tool-filter.js';
 
 const program = new Command();
 
@@ -127,11 +128,9 @@ program
       const isMcpTool = toolName.startsWith('mcp__') || serverName.length > 0;
       if (!isMcpTool) return;
 
-      // Skip undomcp's own tools and read-only tools
-      if (toolName.startsWith('undomcp_') || toolName.startsWith('mcp__undomcp__')) return;
-      const readOnlyPatterns = /^(get|list|search|query|read|fetch|find|lookup|describe|check|view|show|info|status|count)/i;
-      const baseName = toolName.replace(/^mcp__[^_]+__/, '');
-      if (readOnlyPatterns.test(baseName)) return;
+      // Skip undomcp's own tools, native tools, and read-only operations
+      if (!shouldRecordTool(toolName, serverName || undefined)) return;
+      const baseName = extractBaseToolName(toolName, serverName || undefined);
 
       const workingDir = process.env.CLAUDE_PROJECT_DIR || process.env.UNDOMCP_PROJECT_DIR || process.cwd();
       const dbManager = new DatabaseManager();
