@@ -134,13 +134,16 @@ program
 
       const workingDir = process.env.CLAUDE_PROJECT_DIR || process.env.UNDOMCP_PROJECT_DIR || process.cwd();
       const dbManager = new DatabaseManager();
-      const sessionId = `hook_${Date.now()}`;
 
-      // Find or create a session for this project
+      // Reuse the most recent session for this project so hook-reported actions
+      // group together with proxy-intercepted actions from the same project.
       const sessions = dbManager.getSessionsForProject(workingDir);
-      const activeSession = sessions.length > 0 ? sessions[sessions.length - 1].id : sessionId;
-      if (sessions.length === 0) {
-        dbManager.createSession({ id: sessionId, startedAt: new Date().toISOString(), workingDirectory: workingDir });
+      let activeSession: string;
+      if (sessions.length > 0) {
+        activeSession = sessions[sessions.length - 1].id;
+      } else {
+        activeSession = `ses_${nanoid()}`;
+        dbManager.createSession({ id: activeSession, startedAt: new Date().toISOString(), workingDirectory: workingDir });
       }
 
       const actionId = `act_${nanoid()}`;
@@ -163,8 +166,8 @@ program
       const result = data.tool_result || data.output || data.result || {};
       dbManager.updateActionResults(actionId, true, typeof result === 'object' ? result : { raw: result });
       dbManager.close();
-    } catch {
-      // Silent failure — don't break the ADE
+    } catch (err: any) {
+      process.stderr.write(`[undomcp] report-hook error: ${err.message}\n`);
     }
   });
 
