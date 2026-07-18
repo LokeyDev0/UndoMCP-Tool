@@ -13,13 +13,16 @@ import {
 } from '../tools/undo-tools.js';
 import { SchemaCache } from '../undo/schema-cache.js';
 import { InverseResolver } from '../undo/inverse-resolver.js';
+import { generateActionLabel } from '../utils/label-generator.js';
+import { shouldRecordTool, NATIVE_TOOLS } from '../utils/tool-filter.js';
 import { LlmSolver } from '../undo/llm-solver.js';
 import { SnapshotStore, computeSha256 } from '../file-safety/snapshot-store.js';
 import { UndoController } from '../undo/undo-controller.js';
 
 export interface ProxyEngineOptions {
-  command: string;
-  args: string[];
+  command?: string;
+  args?: string[];
+  injectTools?: boolean;
   configPath?: string;
   env?: Record<string, string>;
   dbManager?: DatabaseManager;
@@ -40,8 +43,9 @@ const FILE_TOOL_PATTERNS = [
 ];
 
 export class ProxyEngine {
-  private command: string;
-  private args: string[];
+  private command?: string;
+  private args?: string[];
+  private injectTools: boolean;
   private env: Record<string, string>;
   private isStopping = false;
   
@@ -69,6 +73,7 @@ export class ProxyEngine {
   constructor(options: ProxyEngineOptions) {
     this.command = options.command;
     this.args = options.args;
+    this.injectTools = options.injectTools !== false;
     this.env = { ...process.env, ...(options.env || {}) } as Record<string, string>;
     this.onRequestCallback = options.onRequest;
     this.onResponseCallback = options.onResponse;
@@ -91,10 +96,14 @@ export class ProxyEngine {
       }
     }
 
-    this.upstreamManager = new UpstreamManager(options.configPath, {
-      command: this.command,
-      args: this.args
-    });
+    if (this.command) {
+      this.upstreamManager = new UpstreamManager(options.configPath, {
+        command: this.command,
+        args: this.args || []
+      });
+    } else {
+      this.upstreamManager = new UpstreamManager(options.configPath);
+    }
 
     // Initialize undo system components
     this.schemaCache = new SchemaCache();
@@ -116,6 +125,11 @@ export class ProxyEngine {
   /** Exposes the schema cache for testing and external consumers. */
   public getSchemaCache(): SchemaCache {
     return this.schemaCache;
+  }
+
+  /** Exposes the upstream manager for registering HTTP upstreams. */
+  public getUpstreamManager(): UpstreamManager {
+    return this.upstreamManager;
   }
 
   /**
@@ -261,7 +275,7 @@ export class ProxyEngine {
           // Phase 3: Cache tool schemas for InverseResolver
           this.schemaCache.updateFromToolsList({ tools: allTools });
 
-          const aggregatedTools = [...allTools, ...UNDO_TOOLS];
+          const aggregatedTools = this.injectTools ? [...allTools, ...UNDO_TOOLS] : allTools;
           const response = {
             jsonrpc: '2.0',
             id: parsed.id,
@@ -305,6 +319,19 @@ export class ProxyEngine {
           return;
         }
 
+        if (this.upstreamManager.getNamespaces().length === 0) {
+          const response = {
+            jsonrpc: '2.0',
+            id: parsed.id,
+            error: {
+              code: -32601,
+              message: `Method not found: ${toolName}. Standalone undomcp server only handles undo tools.`
+            }
+          };
+          this.forwardToAgent(JSON.stringify(response), agentStdout);
+          return;
+        }
+
         // Journaling tool call — log all MCP calls for full audit trail
         let actionId: string | undefined;
         const startTime = Date.now();
@@ -322,7 +349,7 @@ export class ProxyEngine {
           delete parsedArgs.__is_undo;
         }
 
-        if (this.dbManager && this.sessionId && !isUndoAction) {
+        if (this.dbManager && this.sessionId && !isUndoAction && shouldRecordTool(baseToolName, namespace)) {
           try {
             // Turn clustering
             this.ensureActiveTurnId();
@@ -334,20 +361,7 @@ export class ProxyEngine {
             const filePath = args.path || args.filePath || args.file || args.TargetFile || args.filename || args.uri || args.target || args.targetPath || args.outputPath;
             const actionType = (isFileModifying && filePath) ? 'file_change' : 'mcp_call';
 
-            let label = `Call ${toolName}`;
-            if (baseToolName === 'write_file' || baseToolName === 'edit_file' || baseToolName === 'replace_file_content' || baseToolName === 'write_to_file') {
-              const filePath = args.path || args.TargetFile || args.filePath || '';
-              label = `Modify file: ${filePath}`;
-            } else if (baseToolName === 'run_command' || baseToolName === 'execute_command') {
-              const command = args.command || args.CommandLine || '';
-              label = `Execute command: ${command}`;
-            } else if (args.path || args.file || args.filename) {
-              const pathVal = args.path || args.file || args.filename;
-              label = `${baseToolName} on ${pathVal}`;
-            } else if (args.id || args.name) {
-              const idVal = args.id || args.name;
-              label = `${baseToolName} (${idVal})`;
-            }
+            const label = generateActionLabel(baseToolName, args);
 
             const action: Action = {
               id: actionId,
@@ -477,7 +491,23 @@ export class ProxyEngine {
       // For 'initialize': broadcast to upstreams, combine capabilities, and return the combined response
       if (parsed.method === 'initialize') {
         try {
-          const response = await this.upstreamManager.broadcast('initialize', parsed.params, parsed.id);
+          let response;
+          if (this.upstreamManager.getNamespaces().length > 0) {
+            response = await this.upstreamManager.broadcast('initialize', parsed.params, parsed.id);
+          } else {
+            response = {
+              jsonrpc: '2.0',
+              id: parsed.id,
+              result: {
+                protocolVersion: parsed.params?.protocolVersion || '2024-11-05',
+                capabilities: { tools: {} },
+                serverInfo: {
+                  name: 'undomcp-standalone',
+                  version: '1.0.0'
+                }
+              }
+            };
+          }
           this.forwardToAgent(JSON.stringify(response), agentStdout);
         } catch (err: any) {
           console.error(`[undomcp] Upstream initialization failed: ${err.message}`);
@@ -500,15 +530,28 @@ export class ProxyEngine {
       }
 
       try {
-        const response = await this.upstreamManager.broadcast(parsed.method, parsed.params, parsed.id);
-        if (this.onResponseCallback) {
-          try {
-            await this.onResponseCallback(parsed, response);
-          } catch (err: any) {
-            console.error(`[undomcp] Error in onResponse callback: ${err.message}`);
+        if (this.upstreamManager.getNamespaces().length > 0) {
+          const response = await this.upstreamManager.broadcast(parsed.method, parsed.params, parsed.id);
+          if (this.onResponseCallback) {
+            try {
+              await this.onResponseCallback(parsed, response);
+            } catch (err: any) {
+              console.error(`[undomcp] Error in onResponse callback: ${err.message}`);
+            }
           }
+          this.forwardToAgent(JSON.stringify(response), agentStdout);
+        } else {
+          // If no upstreams, return error for unhandled requests
+          const response = {
+            jsonrpc: '2.0',
+            id: parsed.id,
+            error: {
+              code: -32601,
+              message: `Method not found: ${parsed.method}. Standalone undomcp server does not support this method.`
+            }
+          };
+          this.forwardToAgent(JSON.stringify(response), agentStdout);
         }
-        this.forwardToAgent(JSON.stringify(response), agentStdout);
       } catch (err: any) {
         const response = {
           jsonrpc: '2.0',
@@ -584,6 +627,10 @@ export class ProxyEngine {
           // Phase 5: Execute undo for specified action IDs
           result = await this.handleUndoAction(args);
 
+        } else if (toolName === 'undomcp_report_action') {
+          // Report an HTTP MCP tool call for journaling (OAuth servers)
+          result = this.handleReportAction(args);
+
         } else {
           error = {
             code: -32601,
@@ -604,6 +651,52 @@ export class ProxyEngine {
       ...(error ? { error } : { result })
     };
     this.forwardToAgent(JSON.stringify(response), agentStdout);
+  }
+
+  private handleReportAction(args: Record<string, any>): any {
+    const toolName = args.tool_name || 'unknown';
+    const namespace = args.namespace || 'http';
+    const parameters = args.parameters || {};
+    const resultData = args.result || {};
+    const success = args.success !== false;
+
+    if (NATIVE_TOOLS.has(toolName.toLowerCase())) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ recorded: false, reason: 'Native tool — not an MCP call' }) }]
+      };
+    }
+    if (!shouldRecordTool(toolName, namespace)) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ recorded: false, reason: 'Read-only tool — not recorded' }) }]
+      };
+    }
+
+    this.ensureActiveTurnId();
+
+    const actionId = `act_${nanoid()}`;
+    const now = Date.now();
+
+    const action: Action = {
+      id: actionId,
+      sessionId: this.sessionId!,
+      turnId: this.turnId,
+      sequenceNum: this.nextSequenceNum++,
+      timestamp: new Date(now).toISOString(),
+      actionType: 'mcp_call',
+      toolName,
+      namespace,
+      parameters,
+      state: 'executed',
+      metadata: { label: generateActionLabel(toolName, parameters) },
+    };
+
+    this.dbManager!.createAction(action);
+    this.dbManager!.updateActionResults(actionId, success, resultData);
+    this.lastActionEndTime = now;
+
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ recorded: true, action_id: actionId }) }]
+    };
   }
 
   /**

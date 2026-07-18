@@ -2,6 +2,7 @@
  * Undo Tools — Defines the MCP tools exposed by the UndoMCP proxy and their handlers.
  */
 import { DatabaseManager, Action } from '../journal/database-manager.js';
+import { NATIVE_TOOLS } from '../utils/tool-filter.js';
 
 // --- Dependency Detection (Phase 2) ---
 
@@ -241,6 +242,21 @@ export const UNDO_TOOLS = [
       },
       required: ['query']
     }
+  },
+  {
+    name: 'undomcp_report_action',
+    description: 'Report an MCP tool call that was made to an external HTTP MCP server (e.g., Notion, GitHub). Call this IMMEDIATELY AFTER making any tool call to an HTTP-based MCP server so it is recorded in the undo journal. This enables undo for OAuth-authenticated servers that cannot be proxied. Do NOT report native IDE tools (Edit, Bash, Write, Read, Glob, Grep) — only external MCP server calls.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tool_name: { type: 'string', description: 'The tool name that was called (e.g., "notion-create-pages")' },
+        namespace: { type: 'string', description: 'The MCP server namespace (e.g., "notion")' },
+        parameters: { type: 'object', description: 'The parameters that were passed to the tool' },
+        result: { type: 'object', description: 'The result returned by the tool (include IDs for undo)' },
+        success: { type: 'boolean', description: 'Whether the call succeeded', default: true }
+      },
+      required: ['tool_name', 'namespace', 'parameters']
+    }
   }
 ];
 
@@ -414,8 +430,9 @@ export function handleListHistory(
   workingDirectory: string,
   limit: number = 50
 ): HistoryEntry[] {
-  const actions = dbManager.getRecentActionsForProject(workingDirectory, limit);
-  
+  const actions = dbManager.getRecentActionsForProject(workingDirectory, limit)
+    .filter(a => !NATIVE_TOOLS.has((a.toolName ?? '').toLowerCase()));
+
   const entries: HistoryEntry[] = actions.map(a => ({
     id: a.id,
     sessionId: a.sessionId,
@@ -452,7 +469,8 @@ export function handleSearchHistory(
   alternatives?: HistoryEntry[];
 } {
   // Retrieve a generous number of recent executed actions for search and dependency mapping
-  const actions = dbManager.getRecentActionsForProject(workingDirectory, 1000);
+  const actions = dbManager.getRecentActionsForProject(workingDirectory, 1000)
+    .filter(a => !NATIVE_TOOLS.has((a.toolName ?? '').toLowerCase()));
   if (actions.length === 0) {
     return { found: false };
   }

@@ -65,8 +65,8 @@ describe('Undo Tools', () => {
   }
 
   describe('UNDO_TOOLS', () => {
-    it('should define exactly 4 tools', () => {
-      expect(UNDO_TOOLS).toHaveLength(4);
+    it('should define exactly 5 tools', () => {
+      expect(UNDO_TOOLS).toHaveLength(5);
     });
 
     it('should contain undomcp_mark_turn', () => {

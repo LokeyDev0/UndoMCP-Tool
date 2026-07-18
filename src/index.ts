@@ -2,8 +2,12 @@
 import { Command } from 'commander';
 import { DatabaseManager } from './journal/database-manager.js';
 import { ProxyEngine } from './proxy/engine.js';
+import { HttpProxyServer } from './proxy/http-proxy-server.js';
+import { HttpRegistry } from './proxy/http-registry.js';
 import { handleListHistory } from './tools/undo-tools.js';
 import { nanoid } from 'nanoid';
+import { generateActionLabel } from './utils/label-generator.js';
+import { shouldRecordTool, extractBaseToolName } from './utils/tool-filter.js';
 
 const program = new Command();
 
@@ -16,8 +20,9 @@ program
 program
   .command('serve')
   .description('Start the undomcp JSON-RPC intercepting proxy server')
-  .requiredOption('--command <cmd>', 'Downstream MCP server executable command')
+  .option('--command <cmd>', 'Downstream MCP server executable command')
   .option('--args <args...>', 'Arguments to pass to the downstream MCP server')
+  .option('--no-tools', 'Do not inject undo tools into the upstream tool list')
   .option('--session-id <id>', 'Session ID for journaling (generates automatically if omitted)')
   .option('--db <path>', 'Custom SQLite database path')
   .option('--idle-timeout <ms>', 'Idle turn clustering threshold in milliseconds', '180000')
@@ -52,7 +57,8 @@ program
       args: parsedArgs,
       dbManager,
       sessionId,
-      turnIdleTimeoutMs
+      turnIdleTimeoutMs,
+      injectTools: options.tools !== false
     });
 
     // Handle clean termination to close database and session
@@ -78,6 +84,91 @@ program
     });
 
     proxy.start();
+
+    // Start HTTP proxy server if there are API-key-based HTTP upstreams (URL rewrite approach)
+    const httpRegistry = new HttpRegistry();
+    const httpUpstreams = httpRegistry.listAll();
+    if (Object.keys(httpUpstreams).length > 0) {
+      const httpProxy = new HttpProxyServer({
+        registry: httpRegistry,
+        dbManager,
+        sessionId,
+        turnIdleTimeoutMs: Number(options.idleTimeout) || 180000,
+      });
+      httpProxy.start().then((port) => {
+        if (port) {
+          process.stderr.write(`[undomcp] HTTP proxy listening on 127.0.0.1:${port}\n`);
+        }
+      }).catch((err) => {
+        process.stderr.write(`[undomcp] HTTP proxy failed to start: ${err.message}\n`);
+      });
+
+      process.on('SIGINT', () => httpProxy.stop());
+      process.on('SIGTERM', () => httpProxy.stop());
+    }
+  });
+
+// Report-hook subcommand (called by ADE hooks after MCP tool calls)
+program
+  .command('report-hook')
+  .description('Record an MCP tool call in the journal (called by ADE hooks, reads JSON from stdin)')
+  .action(async () => {
+    let input = '';
+    process.stdin.setEncoding('utf8');
+    for await (const chunk of process.stdin) {
+      input += chunk;
+    }
+
+    try {
+      const data = JSON.parse(input);
+      const toolName = data.tool_name || data.name || '';
+      const serverName = data.server_name || '';
+
+      // Only record actual MCP tool calls (native tools like Edit/Bash have no mcp__ prefix)
+      const isMcpTool = toolName.startsWith('mcp__') || serverName.length > 0;
+      if (!isMcpTool) return;
+
+      // Skip undomcp's own tools, native tools, and read-only operations
+      if (!shouldRecordTool(toolName, serverName || undefined)) return;
+      const baseName = extractBaseToolName(toolName, serverName || undefined);
+
+      const workingDir = process.env.CLAUDE_PROJECT_DIR || process.env.UNDOMCP_PROJECT_DIR || process.cwd();
+      const dbManager = new DatabaseManager();
+
+      // Reuse the most recent session for this project so hook-reported actions
+      // group together with proxy-intercepted actions from the same project.
+      const sessions = dbManager.getSessionsForProject(workingDir);
+      let activeSession: string;
+      if (sessions.length > 0) {
+        activeSession = sessions[sessions.length - 1].id;
+      } else {
+        activeSession = `ses_${nanoid()}`;
+        dbManager.createSession({ id: activeSession, startedAt: new Date().toISOString(), workingDirectory: workingDir });
+      }
+
+      const actionId = `act_${nanoid()}`;
+      const namespace = serverName || (toolName.match(/^mcp__([^_]+)__/) || [])[1] || 'http';
+      const cleanToolName = baseName;
+
+      dbManager.createAction({
+        id: actionId,
+        sessionId: activeSession,
+        sequenceNum: Date.now(),
+        timestamp: new Date().toISOString(),
+        actionType: 'mcp_call',
+        toolName: cleanToolName,
+        namespace,
+        parameters: data.tool_input || data.input || data.parameters || {},
+        state: 'executed',
+        metadata: { label: generateActionLabel(cleanToolName, data.tool_input || data.input || data.parameters || {}) },
+      });
+
+      const result = data.tool_result || data.output || data.result || {};
+      dbManager.updateActionResults(actionId, true, typeof result === 'object' ? result : { raw: result });
+      dbManager.close();
+    } catch (err: any) {
+      process.stderr.write(`[undomcp] report-hook error: ${err.message}\n`);
+    }
   });
 
 // Setup subcommand
